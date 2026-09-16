@@ -17,6 +17,8 @@ v4.0 — Upgrade notes:
 - ตัวชี้วัดเพิ่ม: Sharpe Ratio, Win Rate, Correlation, Drawdown ทุกโมดูล
 - ทุกโมดูลมีตารางข้อมูลดิบ + ปุ่มดาวน์โหลด CSV
 """
+import time
+import requests
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -189,6 +191,29 @@ window_ma = st.sidebar.slider("⚙️ ค่าเฉลี่ยเคลื่
 lookback_days = st.sidebar.slider("🗓️ ช่วงข้อมูลย้อนหลัง (วัน)", min_value=90, max_value=1095, value=1095, step=30,
                                    help="กรองข้อมูลจากทั้งหมด 3 ปี ให้แสดงเฉพาะ N วันล่าสุด")
 
+st.sidebar.markdown(f"<p style='font-size:12px;color:{MUTED_TEXT};margin-top:6px;'>⚖️ Dealer Risk Controls (โมดูล 4)</p>", unsafe_allow_html=True)
+position_limit_btc = st.sidebar.number_input("📐 Position Limit (BTC)", value=0.50, step=0.05, min_value=0.01,
+                                              help="เพดานสถานะ (inventory) สูงสุดที่ Dealer ถืออนุญาตให้ถือได้ก่อน flag ว่าเกินลิมิต")
+unhedged_pct = st.sidebar.slider("🎯 Unhedged Exposure ต่อรอบ (%)", min_value=0, max_value=100, value=15,
+                                  help="สัดส่วนของแต่ละรอบ arbitrage ที่ยังไม่ถูก hedge ทันที (ความเสี่ยงจาก latency ระหว่างขา XSpring กับขาตลาดภายนอก)")
+
+st.sidebar.markdown(f"<p style='font-size:12px;color:{MUTED_TEXT};margin-top:6px;'>💹 XSpring Price Model (โมดูล 4 — ราคาจริง)</p>", unsafe_allow_html=True)
+xspring_markup_pct = st.sidebar.slider(
+    "Markup ของ XSpring เทียบ Bitkub (%)", min_value=-2.0, max_value=2.0, value=0.0, step=0.05,
+    help="XSpring ไม่มี orderbook อิสระของตัวเอง ราคาที่แสดงอ้างอิงจาก Bitkub อยู่แล้ว หากสังเกตราคาจริงต่างจาก Bitkub ให้ปรับค่านี้"
+)
+xspring_fee_pct = st.sidebar.number_input(
+    "ค่าธรรมเนียม XSpring ต่อขา (%)", value=0.15, step=0.01, min_value=0.0
+) / 100
+external_fee_pct = st.sidebar.number_input(
+    "ค่าธรรมเนียมกระดานต่างประเทศต่อขา (%)", value=0.10, step=0.01, min_value=0.0
+) / 100
+selected_exchanges = st.sidebar.multiselect(
+    "กระดานต่างประเทศที่ใช้เทียบราคาจริง",
+    ["Binance", "Bybit", "OKX", "Coinbase", "Gate", "Bitget"],
+    default=["Binance", "Bybit", "OKX", "Coinbase", "Gate", "Bitget"]
+)
+
 if st.sidebar.button("🔄 รีเฟรชข้อมูลตลาด (ล้างแคช)"):
     st.cache_data.clear()
     st.rerun()
@@ -249,6 +274,254 @@ def fmt_thb_compact(value: float) -> str:
     if abs_v >= 1_000:
         return f"{value / 1_000:.1f}K THB"
     return f"{value:,.0f} THB"
+
+
+# ----------------------------------------------------
+# MODULE 4 DATA SOURCES: ราคาจริงจาก Public API ของแต่ละกระดาน
+# (XSpring ไม่มี public API/ข้อมูลย้อนหลังสาธารณะ — อ้างอิงจาก Bitkub ที่ตรวจสอบแล้วว่า
+#  XSpring ใช้ราคาเดียวกันเป็นฐาน + ค่าธรรมเนียมของตัวเอง)
+# ----------------------------------------------------
+_REQ_HEADERS = {"User-Agent": "Mozilla/5.0 (XSpringQuantTerminal)"}
+_REQ_TIMEOUT = 8
+
+
+def _safe_get(url, params=None):
+    try:
+        r = requests.get(url, params=params, headers=_REQ_HEADERS, timeout=_REQ_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+# ---------- LIVE (ราคา ณ ปัจจุบัน) ----------
+def _live_bitkub_thb():
+    data = _safe_get("https://api.bitkub.com/api/market/ticker")
+    try:
+        return float(data["THB_BTC"]["last"])
+    except Exception:
+        return None
+
+
+def _live_binance_usdt():
+    data = _safe_get("https://api.binance.com/api/v3/ticker/price", {"symbol": "BTCUSDT"})
+    try:
+        return float(data["price"])
+    except Exception:
+        return None
+
+
+def _live_bybit_usdt():
+    data = _safe_get("https://api.bybit.com/v5/market/tickers", {"category": "spot", "symbol": "BTCUSDT"})
+    try:
+        return float(data["result"]["list"][0]["lastPrice"])
+    except Exception:
+        return None
+
+
+def _live_okx_usdt():
+    data = _safe_get("https://www.okx.com/api/v5/market/ticker", {"instId": "BTC-USDT"})
+    try:
+        return float(data["data"][0]["last"])
+    except Exception:
+        return None
+
+
+def _live_coinbase_usd():
+    data = _safe_get("https://api.exchange.coinbase.com/products/BTC-USD/ticker")
+    try:
+        return float(data["price"])
+    except Exception:
+        return None
+
+
+def _live_gate_usdt():
+    data = _safe_get("https://api.gateio.ws/api/v4/spot/tickers", {"currency_pair": "BTC_USDT"})
+    try:
+        return float(data[0]["last"])
+    except Exception:
+        return None
+
+
+def _live_bitget_usdt():
+    data = _safe_get("https://api.bitget.com/api/v2/spot/market/tickers", {"symbol": "BTCUSDT"})
+    try:
+        return float(data["data"][0]["lastPr"])
+    except Exception:
+        return None
+
+
+LIVE_FETCHERS_USD = {
+    "Binance": _live_binance_usdt, "Bybit": _live_bybit_usdt, "OKX": _live_okx_usdt,
+    "Coinbase": _live_coinbase_usd, "Gate": _live_gate_usdt, "Bitget": _live_bitget_usdt,
+}
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def load_live_fx_usdthb():
+    try:
+        d = yf.download("THB=X", period="1d", interval="1m", progress=False)["Close"]
+        return float(d.dropna().iloc[-1])
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def load_live_prices(selected):
+    errors = []
+    bitkub_thb = _live_bitkub_thb()
+    if bitkub_thb is None:
+        errors.append("Bitkub")
+    fx = load_live_fx_usdthb()
+    if fx is None:
+        errors.append("USD/THB FX")
+    rows = {}
+    for ex in selected:
+        fn = LIVE_FETCHERS_USD.get(ex)
+        if fn is None:
+            continue
+        usd_price = fn()
+        if usd_price is None or fx is None:
+            errors.append(ex)
+            continue
+        rows[ex] = usd_price * fx
+    return bitkub_thb, rows, errors, fx
+
+
+# ---------- HISTORICAL (ย้อนหลังจริง ~1 ปี) ----------
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_hist_binance(days=365):
+    data = _safe_get("https://api.binance.com/api/v3/klines",
+                      {"symbol": "BTCUSDT", "interval": "1d", "limit": min(days, 1000)})
+    if not data:
+        return None
+    idx = [pd.to_datetime(r[0], unit="ms") for r in data]
+    close = [float(r[4]) for r in data]
+    return pd.Series(close, index=idx)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_hist_bybit(days=365):
+    data = _safe_get("https://api.bybit.com/v5/market/kline",
+                      {"category": "spot", "symbol": "BTCUSDT", "interval": "D", "limit": min(days, 1000)})
+    try:
+        rows = sorted(data["result"]["list"], key=lambda r: int(r[0]))
+    except Exception:
+        return None
+    if not rows:
+        return None
+    idx = [pd.to_datetime(int(r[0]), unit="ms") for r in rows]
+    close = [float(r[4]) for r in rows]
+    return pd.Series(close, index=idx)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_hist_okx(days=365):
+    all_rows, after = [], ""
+    for _ in range(5):
+        params = {"instId": "BTC-USDT", "bar": "1D", "limit": "100"}
+        if after:
+            params["after"] = after
+        data = _safe_get("https://www.okx.com/api/v5/market/history-candles", params)
+        try:
+            rows = data["data"]
+        except Exception:
+            break
+        if not rows:
+            break
+        all_rows.extend(rows)
+        after = rows[-1][0]
+        if len(all_rows) >= days:
+            break
+    if not all_rows:
+        return None
+    all_rows = sorted(all_rows, key=lambda r: int(r[0]))
+    idx = [pd.to_datetime(int(r[0]), unit="ms") for r in all_rows]
+    close = [float(r[4]) for r in all_rows]
+    return pd.Series(close, index=idx).drop_duplicates()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_hist_coinbase(days=365):
+    import datetime as dt
+    cursor_end = dt.datetime.utcnow()
+    remaining = days
+    points = {}
+    for _ in range(3):
+        span = min(remaining, 300)
+        cursor_start = cursor_end - dt.timedelta(days=span)
+        params = {"granularity": 86400, "start": cursor_start.isoformat(), "end": cursor_end.isoformat()}
+        data = _safe_get("https://api.exchange.coinbase.com/products/BTC-USD/candles", params)
+        if not data:
+            break
+        for row in data:  # [time, low, high, open, close, volume]
+            points[int(row[0])] = float(row[4])
+        cursor_end = cursor_start
+        remaining -= span
+        if remaining <= 0:
+            break
+    if not points:
+        return None
+    ts = sorted(points.keys())
+    return pd.Series([points[t] for t in ts], index=[pd.to_datetime(t, unit="s") for t in ts])
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_hist_gate(days=365):
+    data = _safe_get("https://api.gateio.ws/api/v4/spot/candlesticks",
+                      {"currency_pair": "BTC_USDT", "interval": "1d", "limit": min(days, 1000)})
+    if not data:
+        return None
+    try:
+        idx = [pd.to_datetime(int(r[0]), unit="s") for r in data]
+        close = [float(r[2]) for r in data]  # Gate.io: [t, volume, close, high, low, open]
+        return pd.Series(close, index=idx)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_hist_bitget(days=365):
+    all_rows = []
+    end_time = int(time.time() * 1000)
+    for _ in range(3):
+        params = {"symbol": "BTCUSDT", "granularity": "1day", "endTime": str(end_time), "limit": "200"}
+        data = _safe_get("https://api.bitget.com/api/v2/spot/market/candles", params)
+        try:
+            rows = data["data"]
+        except Exception:
+            break
+        if not rows:
+            break
+        all_rows.extend(rows)
+        end_time = int(rows[0][0]) - 1
+        if len(all_rows) >= days:
+            break
+    if not all_rows:
+        return None
+    all_rows = sorted(all_rows, key=lambda r: int(r[0]))
+    idx = [pd.to_datetime(int(r[0]), unit="ms") for r in all_rows]
+    close = [float(r[4]) for r in all_rows]
+    return pd.Series(close, index=idx).drop_duplicates()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_hist_bitkub(days=365):
+    now = int(time.time())
+    frm = now - days * 86400
+    data = _safe_get("https://api.bitkub.com/tradingview/history",
+                      {"symbol": "THB_BTC", "resolution": "1D", "from": frm, "to": now})
+    if not data or data.get("s") != "ok" or not data.get("t"):
+        return None
+    idx = [pd.to_datetime(t, unit="s") for t in data["t"]]
+    close = [float(c) for c in data["c"]]
+    return pd.Series(close, index=idx)
+
+
+HIST_FETCHERS = {
+    "Binance": fetch_hist_binance, "Bybit": fetch_hist_bybit, "OKX": fetch_hist_okx,
+    "Coinbase": fetch_hist_coinbase, "Gate": fetch_hist_gate, "Bitget": fetch_hist_bitget,
+}
 
 
 # ----------------------------------------------------
@@ -534,134 +807,248 @@ elif app_mode == "3. Multi-Asset Realised Volatility":
     show_data_table(realised_vol, "realised_volatility.csv")
 
 # ----------------------------------------------------
-# MODULE 4: XSPRING MULTI-EXCHANGE ARBITRAGE (1Y)
+# MODULE 4: XSPRING MULTI-EXCHANGE ARBITRAGE (1Y) — ราคาจริงจาก Public API
 # ----------------------------------------------------
 elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
     st.markdown("# XSpring Multi-Exchange Spread & Arbitrage")
-    st.markdown(f"<span style='color: {MUTED_TEXT};'>จำลองส่วนต่างราคาและการทำกำไร Arbitrage ระหว่าง XSpring และกระดานซื้อขายชั้นนำระดับโลก "
-                f"(ราคาของกระดานอื่นเป็นการจำลองด้วย random noise เพื่อสาธิตกลยุทธ์เท่านั้น ไม่ใช่ข้อมูลจริง) — เมาส์ชี้บนกราฟเพื่อดูค่าจริง</span>", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown(f"<span style='color: {MUTED_TEXT};'>เทียบราคาจริงจากกระดานซื้อขายจริง (Live + ย้อนหลัง 1 ปี) — "
+                f"ราคา XSpring เองไม่มี public API จึงประมาณจากราคา Bitkub ที่ XSpring อ้างอิงอยู่จริง</span>",
+                unsafe_allow_html=True)
 
-    @st.cache_data(ttl=3600, show_spinner=False)
-    def load_arb_data():
-        data_arb = yf.download(["BTC-USD", "THB=X"], period="1y", auto_adjust=True, progress=False)["Close"]
-        df_a = pd.DataFrame(index=data_arb.index)
-        df_a["BTC_USD"] = data_arb["BTC-USD"]
-        df_a["FX_THB"] = data_arb["THB=X"]
-        df_a["Global_THB"] = df_a["BTC_USD"] * df_a["FX_THB"]
-        return df_a.dropna()
+    st.info(
+        "**หมายเหตุเรื่องราคา XSpring:** XSpring Digital ไม่มี orderbook อิสระของตัวเองและไม่มี public API "
+        "ให้ดึงราคาปัจจุบันโดยไม่ล็อกอิน จากข้อมูลที่ตรวจสอบได้ ราคาเหรียญของ XSpring อ้างอิงจาก **Bitkub** อยู่แล้ว "
+        "(บวกค่าธรรมเนียมของ XSpring เอง) โมดูลนี้จึงใช้ราคา Bitkub จริงเป็นฐานราคา XSpring แล้วให้ปรับ Markup "
+        "ทางแถบด้านซ้ายได้ หากคุณสังเกตราคาจริงต่างไปจากนี้ หรือมี API บัญชีสถาบันของ XSpring เอง สามารถต่อเข้ามาแทนจุดนี้ได้",
+        icon="ℹ️"
+    )
 
-    try:
-        df_arb = load_arb_data()
-        if df_arb.empty:
-            st.error("⚠️ ไม่พบข้อมูล BTC/THB สำหรับโมดูล Arbitrage")
+    tab_live, tab_backtest = st.tabs(["🔴 Live Arbitrage Monitor", "📈 Backtest ย้อนหลัง (ราคาจริง)"])
+
+    # ============ LIVE TAB ============
+    with tab_live:
+        colr1, _ = st.columns([1, 5])
+        with colr1:
+            if st.button("🔄 ดึงราคาล่าสุด", key="refresh_live_arb"):
+                load_live_prices.clear()
+                load_live_fx_usdthb.clear()
+                st.rerun()
+
+        bitkub_thb, live_rows, live_errors, fx_now = load_live_prices(tuple(selected_exchanges))
+
+        if bitkub_thb is None:
+            st.error("⚠️ ดึงราคา Bitkub ไม่ได้ตอนนี้ (จึงคำนวณราคา XSpring ไม่ได้) ลองกด 'ดึงราคาล่าสุด' อีกครั้ง")
             st.stop()
-    except Exception as e:
-        st.error(f"⚠️ เกิดข้อผิดพลาดขณะดึงข้อมูล: {e}")
-        st.stop()
+        if not live_rows:
+            st.error("⚠️ ดึงราคากระดานต่างประเทศไม่ได้เลยสักกระดาน กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต หรือเลือกกระดานอื่นทางแถบซ้าย")
+            st.stop()
 
-    np.random.seed(42)
-    n_days = len(df_arb)
+        xspring_now = bitkub_thb * (1 + xspring_markup_pct / 100)
 
-    exchanges = {
-        "XSpring": df_arb["Global_THB"] + (np.random.randn(n_days) * 2000) + 1500,
-        "Binance": df_arb["Global_THB"] + np.random.randn(n_days) * 800,
-        "Coinbase": df_arb["Global_THB"] + np.random.randn(n_days) * 1000,
-        "Bybit": df_arb["Global_THB"] + np.random.randn(n_days) * 900,
-        "Bitget": df_arb["Global_THB"] + np.random.randn(n_days) * 1200,
-        "Gate": df_arb["Global_THB"] + np.random.randn(n_days) * 1300,
-        "OKX": df_arb["Global_THB"] + np.random.randn(n_days) * 850,
-        "Binance_TH": df_arb["Global_THB"] + np.random.randn(n_days) * 950,
-        "Bitkub": df_arb["Global_THB"] + (np.random.randn(n_days) * 1500) - 1000,
-    }
+        live_df = pd.DataFrame({
+            "Exchange": ["XSpring (≈Bitkub)"] + list(live_rows.keys()),
+            "Price_THB": [xspring_now] + list(live_rows.values()),
+        })
+        best_buy_ex = min(live_rows, key=live_rows.get)
+        best_sell_ex = max(live_rows, key=live_rows.get)
+        best_buy_price = live_rows[best_buy_ex]
+        best_sell_price = live_rows[best_sell_ex]
 
-    exchange_list = list(exchanges.keys())
-    for ex, price in exchanges.items():
-        df_arb[ex] = price
-        df_arb[f"Spread_{ex}"] = df_arb[ex] - df_arb["Global_THB"]
+        profit_buy_x = best_sell_price * (1 - external_fee_pct) - xspring_now * (1 + xspring_fee_pct)
+        profit_sell_x = xspring_now * (1 - xspring_fee_pct) - best_buy_price * (1 + external_fee_pct)
 
-    fee_pct = 0.0005
-    df_arb["Best_External_Buy"] = df_arb[exchange_list].min(axis=1)
-    df_arb["Best_External_Sell"] = df_arb[exchange_list].max(axis=1)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("ราคา XSpring (≈Bitkub)", f"{xspring_now:,.0f} THB")
+        c2.metric(f"ถูกสุดภายนอก: {best_buy_ex}", f"{best_buy_price:,.0f} THB")
+        c3.metric(f"แพงสุดภายนอก: {best_sell_ex}", f"{best_sell_price:,.0f} THB")
+        c4.metric("USD/THB ที่ใช้แปลง", f"{fx_now:.3f}" if fx_now else "N/A")
 
-    df_arb["Profit_X_Buy"] = df_arb["Best_External_Sell"] * (1 - fee_pct) - df_arb["XSpring"] * (1 + fee_pct)
-    df_arb["Profit_X_Sell"] = df_arb["XSpring"] * (1 - fee_pct) - df_arb["Best_External_Buy"] * (1 + fee_pct)
+        st.markdown("<br>", unsafe_allow_html=True)
+        if profit_buy_x > 0:
+            st.success(f"✅ โอกาส: **ซื้อที่ XSpring** ({xspring_now:,.0f} THB) → **ขายที่ {best_sell_ex}** "
+                       f"({best_sell_price:,.0f} THB) — กำไรสุทธิหลังหักค่าธรรมเนียมทั้งสองขา ≈ **{profit_buy_x:,.0f} THB/BTC**")
+        elif profit_sell_x > 0:
+            st.success(f"✅ โอกาส: **ซื้อที่ {best_buy_ex}** ({best_buy_price:,.0f} THB) → **ขายที่ XSpring** "
+                       f"({xspring_now:,.0f} THB) — กำไรสุทธิหลังหักค่าธรรมเนียมทั้งสองขา ≈ **{profit_sell_x:,.0f} THB/BTC**")
+        else:
+            st.warning("ยังไม่มีส่วนต่างราคาที่คุ้มค่าธรรมเนียมทั้งสองขาในตอนนี้")
 
-    df_arb["Daily_Net_Profit"] = np.maximum(df_arb["Profit_X_Buy"], df_arb["Profit_X_Sell"])
-    df_arb["Daily_Net_Profit"] = np.where(df_arb["Daily_Net_Profit"] > 0, df_arb["Daily_Net_Profit"], 0)
+        if live_errors:
+            st.caption(f"⚠️ ดึงราคาไม่สำเร็จ: {', '.join(live_errors)} (แสดงเฉพาะกระดานที่ดึงได้สำเร็จ)")
 
-    df_arb["Cumulative_Profit"] = df_arb["Daily_Net_Profit"].cumsum()
-    df_arb["Portfolio_Value"] = initial_capital + df_arb["Cumulative_Profit"]
-    df_arb["Drawdown"] = df_arb["Portfolio_Value"] / df_arb["Portfolio_Value"].cummax() - 1
-
-    total_return_arb = (df_arb["Cumulative_Profit"].iloc[-1] / initial_capital) * 100
-    max_dd_arb = df_arb["Drawdown"].min() * 100
-    opportunity_days = int((df_arb["Daily_Net_Profit"] > 0).sum())
-    opportunity_rate = opportunity_days / n_days * 100
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Arbitrage Total Return", f"{total_return_arb:.2f}%")
-    col2.metric("Max Drawdown", f"{max_dd_arb:.2f}%")
-    col3.metric("วันที่มีโอกาส Arbitrage", f"{opportunity_rate:.1f}%")
-    col4.metric("Ending Portfolio Value", fmt_thb_compact(df_arb['Portfolio_Value'].iloc[-1]),
-                help=f"{df_arb['Portfolio_Value'].iloc[-1]:,.2f} THB")
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    fig1 = make_subplots(rows=1, cols=1,
-                          subplot_titles=("1-Year Price Spread Breakdown: All Exchanges vs Global Benchmark (THB)",))
-    for ex in exchange_list:
-        is_xspring = ex == "XSpring"
-        fig1.add_trace(go.Scatter(
-            x=df_arb.index, y=df_arb[f"Spread_{ex}"], name=ex,
-            line=dict(color=EXCHANGE_COLORS[ex], width=2.2 if is_xspring else 1),
-            opacity=1.0 if is_xspring else 0.55,
-            hovertemplate=f"{ex}" + ": %{y:,.0f} THB<extra></extra>"
+        fig_live = go.Figure(go.Bar(
+            x=live_df["Price_THB"], y=live_df["Exchange"], orientation="h",
+            marker_color=[PRIMARY_COLOR if "XSpring" in n else EXCHANGE_COLORS.get(n, ACCENT_BLUE)
+                          for n in live_df["Exchange"]],
+            hovertemplate="%{y}<br>%{x:,.0f} THB<extra></extra>"
         ))
-    fig1.add_hline(y=0, line=dict(color=MUTED_TEXT, dash="dash"))
-    fig1.update_yaxes(title_text="Spread (THB)")
-    fig1 = style_fig(fig1, height=480)
-    st.plotly_chart(fig1, use_container_width=True)
+        fig_live.update_layout(title=dict(text="ราคา BTC ปัจจุบันแต่ละกระดาน (THB)", font=dict(color=PRIMARY_COLOR, size=16)))
+        fig_live = style_fig(fig_live, height=380, hovermode="closest")
+        st.plotly_chart(fig_live, use_container_width=True)
 
-    fig2 = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-                          row_heights=[0.34, 0.33, 0.33],
-                          subplot_titles=("Daily Net Arbitrage Profit (THB per BTC)",
-                                          "1-Year Strategy Equity Curve",
-                                          "Drawdown (%)"))
+        st.caption("ราคาต่างประเทศแปลงเป็น THB ด้วยอัตรา USD/THB spot ล่าสุด (Yahoo Finance) — อาจดีเลย์ 1-2 นาที ไม่ใช่ราคา interbank แบบ real-time")
 
-    fig2.add_trace(go.Scatter(x=df_arb.index, y=df_arb["Daily_Net_Profit"], name="Daily Net Profit",
-                               line=dict(color="#3fb950", width=1),
-                               hovertemplate="%{x|%d %b %Y}<br>Profit: %{y:,.0f} THB<extra></extra>"), row=1, col=1)
+    # ============ BACKTEST TAB ============
+    with tab_backtest:
+        st.markdown(f"<span style='color: {MUTED_TEXT}; font-size: 13px;'>ราคากระดานต่างประเทศเป็นข้อมูลจริงย้อนหลังจาก public API "
+                    f"ของแต่ละกระดาน ราคา XSpring ประมาณจาก Bitkub ย้อนหลังจริง + markup ที่ตั้งค่าไว้ทางซ้าย</span>",
+                    unsafe_allow_html=True)
 
-    fig2.add_trace(go.Scatter(x=df_arb.index, y=df_arb["Portfolio_Value"], name="Portfolio Value",
-                               line=dict(color=ACCENT_BLUE, width=2),
-                               hovertemplate="%{x|%d %b %Y}<br>Portfolio: %{y:,.0f} THB<extra></extra>"), row=2, col=1)
+        with st.spinner("🔄 กำลังดึงข้อมูลราคาย้อนหลังจริงจากแต่ละกระดาน..."):
+            bitkub_hist = fetch_hist_bitkub(lookback_days)
+            hist_data, hist_errors = {}, []
+            for ex in selected_exchanges:
+                fetch_fn = HIST_FETCHERS.get(ex)
+                if fetch_fn is None:
+                    continue
+                s = fetch_fn(lookback_days)
+                if s is None or s.empty:
+                    hist_errors.append(ex)
+                else:
+                    hist_data[ex] = s
 
-    fig2.add_trace(go.Scatter(x=df_arb.index, y=df_arb["Drawdown"] * 100, name="Drawdown",
-                               line=dict(color=ACCENT_RED, width=1), fill="tozeroy",
-                               fillcolor="rgba(255,77,77,0.25)",
-                               hovertemplate="%{x|%d %b %Y}<br>Drawdown: %{y:.2f}%<extra></extra>"), row=3, col=1)
+        if bitkub_hist is None or bitkub_hist.empty:
+            st.error("⚠️ ดึงราคาย้อนหลังของ Bitkub ไม่ได้ (endpoint อาจเปลี่ยนแปลง) จึงคำนวณราคา XSpring ย้อนหลังไม่ได้")
+            st.stop()
+        if not hist_data:
+            st.error("⚠️ ดึงราคาย้อนหลังของกระดานต่างประเทศไม่ได้เลยสักกระดาน กรุณาลองเลือกกระดานอื่นทางแถบซ้าย")
+            st.stop()
+        if hist_errors:
+            st.caption(f"⚠️ ดึงข้อมูลย้อนหลังไม่สำเร็จ: {', '.join(hist_errors)} (คำนวณเฉพาะกระดานที่ดึงได้สำเร็จ)")
 
-    fig2 = style_fig(fig2, height=750)
-    st.plotly_chart(fig2, use_container_width=True)
+        fx_hist = df_market_full["THB=X"].reindex(bitkub_hist.index, method="nearest")
 
-    st.markdown("### 📊 สรุป Spread เฉลี่ยรายกระดาน (เทียบ Global Benchmark)")
-    avg_spread = pd.Series({ex: df_arb[f"Spread_{ex}"].mean() for ex in exchange_list}).sort_values()
+        df_bt = pd.DataFrame(index=bitkub_hist.index)
+        df_bt["Bitkub_THB"] = bitkub_hist
+        df_bt["XSpring"] = df_bt["Bitkub_THB"] * (1 + xspring_markup_pct / 100)
 
-    fig3 = go.Figure(go.Bar(
-        x=avg_spread.values, y=avg_spread.index, orientation="h",
-        marker_color=[EXCHANGE_COLORS[ex] for ex in avg_spread.index],
-        hovertemplate="%{y}<br>Avg Spread: %{x:,.0f} THB<extra></extra>"
-    ))
-    fig3.add_vline(x=0, line=dict(color=MUTED_TEXT))
-    fig3.update_layout(title=dict(text="Average Spread per Exchange (THB)", font=dict(color=PRIMARY_COLOR, size=16)))
-    fig3 = style_fig(fig3, height=420, hovermode="closest")
-    st.plotly_chart(fig3, use_container_width=True)
+        exchange_list_bt = []
+        for ex, s in hist_data.items():
+            aligned = s.reindex(df_bt.index, method="nearest")
+            df_bt[ex] = aligned * fx_hist
+            exchange_list_bt.append(ex)
 
-    show_data_table(df_arb, "xspring_arbitrage.csv")
+        df_bt = df_bt.dropna()
+        if df_bt.empty or len(exchange_list_bt) == 0:
+            st.error("⚠️ ข้อมูลที่ดึงมาไม่พอสำหรับคำนวณ (วันที่ไม่ตรงกันหรือข้อมูลไม่พอ)")
+            st.stop()
+
+        for ex in exchange_list_bt:
+            df_bt[f"Spread_{ex}"] = df_bt[ex] - df_bt["XSpring"]
+
+        df_bt["Best_External_Buy"] = df_bt[exchange_list_bt].min(axis=1)
+        df_bt["Best_External_Sell"] = df_bt[exchange_list_bt].max(axis=1)
+
+        df_bt["Profit_X_Buy"] = df_bt["Best_External_Sell"] * (1 - external_fee_pct) - df_bt["XSpring"] * (1 + xspring_fee_pct)
+        df_bt["Profit_X_Sell"] = df_bt["XSpring"] * (1 - xspring_fee_pct) - df_bt["Best_External_Buy"] * (1 + external_fee_pct)
+
+        df_bt["Daily_Net_Profit"] = np.maximum(df_bt["Profit_X_Buy"], df_bt["Profit_X_Sell"])
+        df_bt["Daily_Net_Profit"] = np.where(df_bt["Daily_Net_Profit"] > 0, df_bt["Daily_Net_Profit"], 0)
+
+        df_bt["Cumulative_Profit"] = df_bt["Daily_Net_Profit"].cumsum()
+        df_bt["Portfolio_Value"] = initial_capital + df_bt["Cumulative_Profit"]
+        df_bt["Drawdown"] = df_bt["Portfolio_Value"] / df_bt["Portfolio_Value"].cummax() - 1
+
+        n_days_bt = len(df_bt)
+        total_return_bt = (df_bt["Cumulative_Profit"].iloc[-1] / initial_capital) * 100
+        max_dd_bt = df_bt["Drawdown"].min() * 100
+        opportunity_days_bt = int((df_bt["Daily_Net_Profit"] > 0).sum())
+        opportunity_rate_bt = opportunity_days_bt / n_days_bt * 100 if n_days_bt else 0
+
+        # --- Dealer Inventory & Risk (โครงเดิม ใช้ต่อได้กับข้อมูลจริง) ---
+        trade_direction = np.sign(df_bt["Profit_X_Buy"] - df_bt["Profit_X_Sell"]) * (df_bt["Daily_Net_Profit"] > 0)
+        trade_size_btc = np.where(df_bt["Daily_Net_Profit"] > 0,
+                                   df_bt["Daily_Net_Profit"] / df_bt["XSpring"] * 50, 0.0)
+        unhedged_leg_btc = trade_direction * trade_size_btc * (unhedged_pct / 100)
+        inventory = np.zeros(n_days_bt)
+        for i in range(n_days_bt):
+            prev = inventory[i - 1] if i > 0 else 0.0
+            inventory[i] = prev * 0.70 + unhedged_leg_btc.iloc[i]
+        df_bt["Net_Inventory_BTC"] = inventory
+        df_bt["Inventory_Value_THB"] = df_bt["Net_Inventory_BTC"].abs() * df_bt["XSpring"]
+
+        btc_daily_vol = np.log(df_bt["XSpring"] / df_bt["XSpring"].shift(1)).std()
+        df_bt["VaR_95_THB"] = 1.65 * btc_daily_vol * df_bt["Inventory_Value_THB"]
+
+        current_inventory = df_bt["Net_Inventory_BTC"].iloc[-1]
+        current_var = df_bt["VaR_95_THB"].iloc[-1]
+        capital_utilization = (df_bt["Inventory_Value_THB"].iloc[-1] / initial_capital) * 100
+        limit_breach_days = int((df_bt["Net_Inventory_BTC"].abs() > position_limit_btc).sum())
+        is_breaching_now = abs(current_inventory) > position_limit_btc
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Arbitrage Total Return", f"{total_return_bt:.2f}%")
+        col2.metric("Max Drawdown", f"{max_dd_bt:.2f}%")
+        col3.metric("วันที่มีโอกาส Arbitrage", f"{opportunity_rate_bt:.1f}%")
+        col4.metric("Ending Portfolio Value", fmt_thb_compact(df_bt['Portfolio_Value'].iloc[-1]),
+                    help=f"{df_bt['Portfolio_Value'].iloc[-1]:,.2f} THB")
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        st.markdown("### ⚖️ Dealer Inventory & Risk Exposure")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Net Inventory ปัจจุบัน", f"{current_inventory:+.4f} BTC",
+                  help=f"เทียบกับ Position Limit ที่ตั้งไว้ {position_limit_btc:.2f} BTC")
+        r2.metric("1-Day VaR (95%)", fmt_thb_compact(current_var), help=f"{current_var:,.2f} THB")
+        r3.metric("Capital Utilization", f"{capital_utilization:.2f}%")
+        r4.metric("สถานะ Limit", "🔴 เกินลิมิต" if is_breaching_now else "🟢 ปกติ",
+                  help=f"เกินลิมิตไปแล้ว {limit_breach_days} วัน จากทั้งหมด {n_days_bt} วัน")
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        fig1 = make_subplots(rows=1, cols=1,
+                              subplot_titles=("1-Year Price Spread: กระดานจริง vs XSpring (≈Bitkub) (THB)",))
+        for ex in exchange_list_bt:
+            fig1.add_trace(go.Scatter(
+                x=df_bt.index, y=df_bt[f"Spread_{ex}"], name=ex,
+                line=dict(color=EXCHANGE_COLORS.get(ex, ACCENT_BLUE), width=1.4),
+                hovertemplate=f"{ex}" + ": %{y:,.0f} THB<extra></extra>"
+            ))
+        fig1.add_hline(y=0, line=dict(color=MUTED_TEXT, dash="dash"))
+        fig1.update_yaxes(title_text="Spread vs XSpring (THB)")
+        fig1 = style_fig(fig1, height=480)
+        st.plotly_chart(fig1, use_container_width=True)
+
+        fig2 = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                              row_heights=[0.34, 0.33, 0.33],
+                              subplot_titles=("Daily Net Arbitrage Profit (THB per BTC)",
+                                              "1-Year Strategy Equity Curve",
+                                              "Drawdown (%)"))
+        fig2.add_trace(go.Scatter(x=df_bt.index, y=df_bt["Daily_Net_Profit"], name="Daily Net Profit",
+                                   line=dict(color="#3fb950", width=1),
+                                   hovertemplate="%{x|%d %b %Y}<br>Profit: %{y:,.0f} THB<extra></extra>"), row=1, col=1)
+        fig2.add_trace(go.Scatter(x=df_bt.index, y=df_bt["Portfolio_Value"], name="Portfolio Value",
+                                   line=dict(color=ACCENT_BLUE, width=2),
+                                   hovertemplate="%{x|%d %b %Y}<br>Portfolio: %{y:,.0f} THB<extra></extra>"), row=2, col=1)
+        fig2.add_trace(go.Scatter(x=df_bt.index, y=df_bt["Drawdown"] * 100, name="Drawdown",
+                                   line=dict(color=ACCENT_RED, width=1), fill="tozeroy",
+                                   fillcolor="rgba(255,77,77,0.25)",
+                                   hovertemplate="%{x|%d %b %Y}<br>Drawdown: %{y:.2f}%<extra></extra>"), row=3, col=1)
+        fig2 = style_fig(fig2, height=750)
+        st.plotly_chart(fig2, use_container_width=True)
+
+        st.markdown("### 📊 สรุป Spread เฉลี่ยรายกระดาน (เทียบ XSpring)")
+        avg_spread_bt = pd.Series({ex: df_bt[f"Spread_{ex}"].mean() for ex in exchange_list_bt}).sort_values()
+        fig3 = go.Figure(go.Bar(
+            x=avg_spread_bt.values, y=avg_spread_bt.index, orientation="h",
+            marker_color=[EXCHANGE_COLORS.get(ex, ACCENT_BLUE) for ex in avg_spread_bt.index],
+            hovertemplate="%{y}<br>Avg Spread: %{x:,.0f} THB<extra></extra>"
+        ))
+        fig3.add_vline(x=0, line=dict(color=MUTED_TEXT))
+        fig3.update_layout(title=dict(text="Average Spread vs XSpring per Exchange (THB)", font=dict(color=PRIMARY_COLOR, size=16)))
+        fig3 = style_fig(fig3, height=420, hovermode="closest")
+        st.plotly_chart(fig3, use_container_width=True)
+
+        st.caption(
+            "⚠️ **ข้อจำกัดที่ควรรู้ก่อนใช้จริง:** สเปรดที่เห็นเป็นราคาจริง แต่การโอนเงินบาท/คริปโตข้ามประเทศเข้า-ออกกระดานไทย "
+            "มีเวลาโอน ขั้นตอน KYC/AML และเพดานวงเงินที่ระบบจริงต้องรอ ไม่สามารถปิดสถานะ 2 ขาพร้อมกันได้ทันทีเหมือนเทรดในกระดานเดียว "
+            "ตัวเลขกำไรในกราฟจึงเป็น 'กำไรตามราคาที่สังเกตได้' ไม่ใช่กำไรที่รับประกันว่าทำได้จริงเสมอ"
+        )
+
+        show_data_table(df_bt, "xspring_arbitrage_real.csv")
 
 st.markdown("---")
 st.markdown(
     f"<p style='font-size:11px;color:{MUTED_TEXT};'>⚠️ Disclaimer: เครื่องมือนี้ใช้เพื่อการศึกษาและสาธิตกลยุทธ์เชิงปริมาณเท่านั้น "
-    f"ไม่ถือเป็นคำแนะนำการลงทุน ข้อมูลราคาบางส่วน (โมดูล 4) เป็นการจำลองด้วย random noise</p>",
+    f"ไม่ถือเป็นคำแนะนำการลงทุน ราคาทุกกระดานในโมดูล 4 ดึงจาก public API จริง ยกเว้นราคา XSpring ที่ไม่มี public API สาธารณะ "
+    f"จึงประมาณจากราคา Bitkub ที่ตรวจสอบแล้วว่า XSpring อ้างอิงอยู่จริง + markup ที่ปรับได้ ผลตอบแทนจาก backtest ไม่รวมข้อจำกัดการโอนเงิน/สินทรัพย์ข้ามกระดานจริง</p>",
     unsafe_allow_html=True
 )
