@@ -442,17 +442,47 @@ def fetch_hist_bitget(days=365):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_hist_bitkub(days=365):
+    """ราคา BTC/THB ย้อนหลังจาก Bitkub
+
+    หมายเหตุ: endpoint /tradingview/history ของ Bitkub ไม่เสถียร — บางช่วงถูก
+    deprecate/คืนค่าว่าง หรือปฏิเสธด้วย HTTP 400 ขึ้นกับรูปแบบ symbol ที่ส่งไป
+    (บางเวอร์ชันของเอกสาร/ライブラリ ใช้ "BTC_THB" บางที่ใช้ "THB_BTC")
+    เพื่อความเสถียร โค้ดนี้ลองทั้งสองรูปแบบก่อน แล้วค่อย fallback ไปใช้ CoinGecko
+    (public API ไม่ต้องใช้ key และรองรับราคาสกุล THB โดยตรง) เพื่อไม่ให้ทั้งโมดูลล่ม
+    ถ้า endpoint ของ Bitkub มีปัญหา
+    """
     now = int(time.time())
     frm = now - days * 86400
-    data, err = _safe_get("https://api.bitkub.com/tradingview/history",
-                           {"symbol": "THB_BTC", "resolution": "1D", "from": frm, "to": now})
+    last_err = None
+
+    for sym in ("BTC_THB", "THB_BTC"):
+        data, err = _safe_get(
+            "https://api.bitkub.com/tradingview/history",
+            {"symbol": sym, "resolution": "1D", "from": frm, "to": now},
+        )
+        if err:
+            last_err = err
+            continue
+        if not data or data.get("s") != "ok" or not data.get("t"):
+            last_err = "รูปแบบข้อมูลเปลี่ยนหรือไม่มีข้อมูล (parse error)"
+            continue
+        idx = [pd.to_datetime(t, unit="s") for t in data["t"]]
+        close = [float(c) for c in data["c"]]
+        return pd.Series(close, index=idx), None
+
+    # Fallback: CoinGecko ให้ราคา BTC เป็น THB ตรง ๆ รายวัน ไม่ต้องแปลงอัตราแลกเปลี่ยนเอง
+    data, err = _safe_get(
+        "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
+        {"vs_currency": "thb", "days": min(days, 365), "interval": "daily"},
+    )
     if err:
-        return None, err
-    if not data or data.get("s") != "ok" or not data.get("t"):
-        return None, "รูปแบบข้อมูลเปลี่ยนหรือไม่มีข้อมูล (parse error)"
-    idx = [pd.to_datetime(t, unit="s") for t in data["t"]]
-    close = [float(c) for c in data["c"]]
-    return pd.Series(close, index=idx), None
+        return None, f"Bitkub ({last_err}) และ CoinGecko ({err}) ดึงไม่ได้ทั้งคู่"
+    prices = (data or {}).get("prices")
+    if not prices:
+        return None, "ไม่มีข้อมูลราคาทั้งจาก Bitkub และ CoinGecko"
+    idx = [pd.to_datetime(p[0], unit="ms").normalize() for p in prices]
+    close = [float(p[1]) for p in prices]
+    return pd.Series(close, index=idx).drop_duplicates(), None
 
 
 HIST_FETCHERS = {
