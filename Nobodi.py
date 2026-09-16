@@ -201,7 +201,7 @@ st.sidebar.markdown(f"<p style='font-size: 11px; color: {MUTED_TEXT};'>Instituti
 # ----------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_market_data():
-    data = yf.download(["USDTHB=X", "USDT-USD", "USDC-USD", "THB=X", "BTC-USD"],
+    data = yf.download(["USDTHB=X", "USDT-USD", "USDC-USD", "THB=X", "BTC-USD", "ETH-USD"],
                         period="3y", auto_adjust=True, progress=False)
     if "Close" in data.columns:
         close_data = data["Close"]
@@ -429,43 +429,88 @@ elif app_mode == "2. USDT vs USDC Z-Score & Spread (THB)":
 # ----------------------------------------------------
 elif app_mode == "3. Multi-Asset Realised Volatility":
     st.markdown("# Multi-Asset Realised Volatility")
-    st.markdown(f"<span style='color: {MUTED_TEXT};'>เปรียบเทียบความผันผวนย้อนหลัง 30 วัน (30D Annualised RV %) ของ USDT, USDC และ THB/USD — เมาส์ชี้บนกราฟและ heatmap เพื่อดูค่าจริง</span>", unsafe_allow_html=True)
+    st.markdown(f"<span style='color: {MUTED_TEXT};'>เปรียบเทียบความผันผวนย้อนหลัง 30 วัน (30D Annualised RV %) ของ BTC, ETH, USDT, USDC และ THB/USD — เมาส์ชี้บนกราฟ/heatmap/พื้นผิว 3D เพื่อดูค่าจริง</span>", unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
     df_v = pd.DataFrame(index=df_market.index)
+    df_v["BTC"] = df_market["BTC-USD"]
+    df_v["ETH"] = df_market["ETH-USD"]
     df_v["USDT"] = df_market["USDT-USD"]
     df_v["USDC"] = df_market["USDC-USD"]
     df_v["THB"] = df_market["THB=X"]
     df_v = df_v.dropna()
 
+    ASSET_ORDER = ["BTC", "ETH", "USDT", "USDC", "THB"]
+    rv_colors = {
+        "BTC": "#00E5FF", "ETH": "#B388FF", "USDT": PRIMARY_COLOR,
+        "USDC": ACCENT_ORANGE, "THB": ACCENT_RED,
+    }
+
     log_returns = np.log(df_v / df_v.shift(1))
     realised_vol = (log_returns.rolling(30).std() * np.sqrt(365) * 100).dropna()
 
-    avg_usdt_rv = realised_vol["USDT"].mean()
-    avg_usdc_rv = realised_vol["USDC"].mean()
-    avg_thb_rv = realised_vol["THB"].mean()
+    rv_avg = {a: realised_vol[a].mean() for a in ASSET_ORDER}
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("USDT Avg Volatility", f"{avg_usdt_rv:.2f}%")
-    col2.metric("USDC Avg Volatility", f"{avg_usdc_rv:.2f}%")
-    col3.metric("THB/USD Avg Volatility", f"{avg_thb_rv:.2f}%")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("BTC Avg Volatility", f"{rv_avg['BTC']:.1f}%")
+    col2.metric("ETH Avg Volatility", f"{rv_avg['ETH']:.1f}%")
+    col3.metric("USDT Avg Volatility", f"{rv_avg['USDT']:.2f}%")
+    col4.metric("USDC Avg Volatility", f"{rv_avg['USDC']:.2f}%")
+    col5.metric("THB/USD Avg Volatility", f"{rv_avg['THB']:.2f}%")
     st.markdown("<br>", unsafe_allow_html=True)
 
     fig = go.Figure()
-    rv_colors = {"USDT": PRIMARY_COLOR, "USDC": ACCENT_ORANGE, "THB": ACCENT_RED}
-    rv_avg = {"USDT": avg_usdt_rv, "USDC": avg_usdc_rv, "THB": avg_thb_rv}
-    for col in ["USDT", "USDC", "THB"]:
+    for a in ASSET_ORDER:
         fig.add_trace(go.Scatter(
-            x=realised_vol.index, y=realised_vol[col],
-            name=f"{col} RV (Avg: {rv_avg[col]:.2f}%)",
-            line=dict(color=rv_colors[col], width=1.5),
-            hovertemplate="%{x|%d %b %Y}<br>" + col + ": %{y:.2f}%<extra></extra>"
+            x=realised_vol.index, y=realised_vol[a],
+            name=f"{a} RV (Avg: {rv_avg[a]:.2f}%)",
+            line=dict(color=rv_colors[a], width=1.5),
+            hovertemplate="%{x|%d %b %Y}<br>" + a + ": %{y:.2f}%<extra></extra>"
         ))
     fig.update_layout(title=dict(text="30-Day Annualised Realised Volatility Comparison (%)",
                                   font=dict(color=PRIMARY_COLOR, size=16)))
     fig.update_yaxes(title_text="Volatility (%)")
     fig = style_fig(fig, height=480)
     st.plotly_chart(fig, use_container_width=True)
+
+    # ----------------------------------------------------
+    # 🌋 3D VOLATILITY LANDSCAPE — เวลา × สินทรัพย์ × ความผันผวน
+    # ----------------------------------------------------
+    st.markdown("### 🌋 Volatility Landscape (3D) — หมุน/ซูม/เอียงมุมได้ด้วยเมาส์")
+    st.markdown(f"<span style='color: {MUTED_TEXT}; font-size: 13px;'>พื้นผิว 3 มิติแสดงความสัมพันธ์ระหว่าง เวลา (แกน X) × สินทรัพย์ (แกน Y) × ระดับความผันผวน (แกน Z สูง = ผันผวนมาก) "
+                f"— BTC/ETH จะเห็นเป็นเทือกเขาสูงชัดเจน ต่างจาก stablecoin ที่ราบเรียบ</span>", unsafe_allow_html=True)
+
+    z_matrix = np.array([realised_vol[a].values for a in ASSET_ORDER])
+    y_positions = list(range(len(ASSET_ORDER)))
+
+    fig_3d = go.Figure(data=[go.Surface(
+        x=realised_vol.index, y=y_positions, z=z_matrix,
+        colorscale=[[0, "#0d1117"], [0.35, "#0d3d24"], [0.7, "#0e8a4a"], [1, PRIMARY_COLOR]],
+        showscale=True,
+        colorbar=dict(title="RV %", tickfont=dict(color=TEXT_COLOR), title_font=dict(color=TEXT_COLOR)),
+        hovertemplate="Asset: %{customdata}<br>%{x|%d %b %Y}<br>RV: %{z:.2f}%<extra></extra>",
+        customdata=np.array([[a] * len(realised_vol.index) for a in ASSET_ORDER]),
+        contours=dict(z=dict(show=True, usecolormap=True, highlightcolor=TEXT_COLOR, project=dict(z=True))),
+    )])
+
+    fig_3d.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=BG_COLOR,
+        font=dict(color=TEXT_COLOR, family="Inter, sans-serif"),
+        height=650,
+        margin=dict(l=0, r=0, t=30, b=0),
+        scene=dict(
+            xaxis=dict(title="Time", color=TEXT_COLOR, gridcolor=GRID_COLOR,
+                       backgroundcolor=PANEL_COLOR, zerolinecolor=GRID_COLOR),
+            yaxis=dict(title="Asset", color=TEXT_COLOR, gridcolor=GRID_COLOR,
+                       backgroundcolor=PANEL_COLOR, zerolinecolor=GRID_COLOR,
+                       tickmode="array", tickvals=y_positions, ticktext=ASSET_ORDER),
+            zaxis=dict(title="Volatility (%)", color=TEXT_COLOR, gridcolor=GRID_COLOR,
+                       backgroundcolor=PANEL_COLOR, zerolinecolor=GRID_COLOR),
+            camera=dict(eye=dict(x=1.6, y=-1.6, z=0.9)),
+        ),
+    )
+    st.plotly_chart(fig_3d, use_container_width=True)
 
     st.markdown("### 🔗 Correlation Matrix (Log Returns)")
     corr_matrix = log_returns.corr().round(3)
@@ -483,7 +528,7 @@ elif app_mode == "3. Multi-Asset Realised Volatility":
         colorbar=dict(title="ρ", tickfont=dict(color=TEXT_COLOR), title_font=dict(color=TEXT_COLOR)),
     ))
     fig_heat.update_layout(title=dict(text="Return Correlation", font=dict(color=PRIMARY_COLOR, size=16)))
-    fig_heat = style_fig(fig_heat, height=420, hovermode="closest")
+    fig_heat = style_fig(fig_heat, height=460, hovermode="closest")
     st.plotly_chart(fig_heat, use_container_width=True)
 
     show_data_table(realised_vol, "realised_volatility.csv")
