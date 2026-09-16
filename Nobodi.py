@@ -800,7 +800,8 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
         df_bt["Spread_Profit_Per_BTC"] > 0, df_bt["Spread_Profit_Per_BTC"] * trade_size_btc, 0.0
     )
 
-    unhedged_leg_btc = trade_direction * trade_size_btc * (unhedged_pct / 100)
+    # แก้บั๊ก NaN: เติม .fillna(0.0) ป้องกันข้อมูลขยะลามเข้าระบบคำนวณความเสี่ยงสะสม
+    unhedged_leg_btc = (trade_direction * trade_size_btc * (unhedged_pct / 100)).fillna(0.0)
     inventory = np.zeros(n_days_bt)
     for i in range(n_days_bt):
         prev = inventory[i - 1] if i > 0 else 0.0
@@ -812,7 +813,8 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
     prev_inventory_btc = pd.Series(inventory, index=df_bt.index).shift(1).fillna(0.0)
     df_bt["Inventory_PnL_THB"] = prev_inventory_btc * price_change_thb
 
-    df_bt["Daily_Net_Profit"] = df_bt["Arb_Profit_THB"] + df_bt["Inventory_PnL_THB"]
+    # คำนวณ Daily_Net_Profit โดยจัดการค่า NaN ที่อาจหลงเหลือจากการหักลบ
+    df_bt["Daily_Net_Profit"] = (df_bt["Arb_Profit_THB"] + df_bt["Inventory_PnL_THB"]).fillna(0.0)
 
     df_bt["Cumulative_Profit"] = df_bt["Daily_Net_Profit"].cumsum()
     df_bt["Portfolio_Value"] = initial_capital + df_bt["Cumulative_Profit"]
