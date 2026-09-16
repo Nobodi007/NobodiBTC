@@ -882,23 +882,25 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
     df_bt["Profit_X_Buy"] = df_bt["Best_External_Sell"] * (1 - external_fee_pct) - df_bt["XSpring"] * (1 + xspring_fee_pct)
     df_bt["Profit_X_Sell"] = df_bt["XSpring"] * (1 - xspring_fee_pct) - df_bt["Best_External_Buy"] * (1 + external_fee_pct)
 
-    df_bt["Daily_Net_Profit"] = np.maximum(df_bt["Profit_X_Buy"], df_bt["Profit_X_Sell"])
-    df_bt["Daily_Net_Profit"] = np.where(df_bt["Daily_Net_Profit"] > 0, df_bt["Daily_Net_Profit"], 0)
-
-    df_bt["Cumulative_Profit"] = df_bt["Daily_Net_Profit"].cumsum()
-    df_bt["Portfolio_Value"] = initial_capital + df_bt["Cumulative_Profit"]
-    df_bt["Drawdown"] = df_bt["Portfolio_Value"] / df_bt["Portfolio_Value"].cummax() - 1
-
+    # ส่วนต่างราคาสุทธิ "ต่อ 1 BTC" หลังหักค่าธรรมเนียมแล้ว (ยังไม่ใช่กำไรที่ทำได้จริง —
+    # ต้องคูณด้วยขนาดสถานะที่เทรดได้จริงก่อน)
+    df_bt["Spread_Profit_Per_BTC"] = np.maximum(df_bt["Profit_X_Buy"], df_bt["Profit_X_Sell"])
+    df_bt["Spread_Profit_Per_BTC"] = np.where(df_bt["Spread_Profit_Per_BTC"] > 0, df_bt["Spread_Profit_Per_BTC"], 0.0)
     n_days_bt = len(df_bt)
-    total_return_bt = (df_bt["Cumulative_Profit"].iloc[-1] / initial_capital) * 100
-    max_dd_bt = df_bt["Drawdown"].min() * 100
-    opportunity_days_bt = int((df_bt["Daily_Net_Profit"] > 0).sum())
-    opportunity_rate_bt = opportunity_days_bt / n_days_bt * 100 if n_days_bt else 0
 
-    # --- Dealer Inventory & Risk ---
-    trade_direction = np.sign(df_bt["Profit_X_Buy"] - df_bt["Profit_X_Sell"]) * (df_bt["Daily_Net_Profit"] > 0)
-    trade_size_btc = np.where(df_bt["Daily_Net_Profit"] > 0,
-                               df_bt["Daily_Net_Profit"] / df_bt["XSpring"] * 50, 0.0)
+    # --- ขนาดสถานะที่เทรดได้จริงต่อวัน ---
+    # เดิมโค้ดคูณส่วนต่างราคาต่อ BTC ตรง ๆ เข้ากับพอร์ตเหมือนเทรดได้ไม่จำกัดทุกวัน ทำให้ผลตอบแทนพองเกินจริง
+    # (เช่น 80,000%+ ต่อปี) ในความเป็นจริง Dealer ใช้เงินทุนจำกัด และมี Position Limit ที่ตั้งไว้เอง
+    # (แถบด้านซ้าย) จึงจำกัดขนาดสถานะต่อวันด้วยค่าที่น้อยกว่าระหว่าง Position Limit กับเงินทุนตั้งต้นที่มี
+    trade_size_btc = np.minimum(position_limit_btc, initial_capital / df_bt["XSpring"])
+    trade_direction = np.sign(df_bt["Profit_X_Buy"] - df_bt["Profit_X_Sell"]) * (df_bt["Spread_Profit_Per_BTC"] > 0)
+
+    # กำไรที่ realize จริงจากการทำ arbitrage ต่อวัน (บาท) = ส่วนต่างราคาต่อ BTC × ขนาดสถานะที่เทรดจริง
+    df_bt["Arb_Profit_THB"] = np.where(
+        df_bt["Spread_Profit_Per_BTC"] > 0, df_bt["Spread_Profit_Per_BTC"] * trade_size_btc, 0.0
+    )
+
+    # --- Dealer Inventory: ส่วนที่ยัง unhedged จากแต่ละรอบ (ความเสี่ยงจาก latency ระหว่างขา XSpring กับตลาดนอก) ---
     unhedged_leg_btc = trade_direction * trade_size_btc * (unhedged_pct / 100)
     inventory = np.zeros(n_days_bt)
     for i in range(n_days_bt):
@@ -906,6 +908,25 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
         inventory[i] = prev * 0.70 + unhedged_leg_btc.iloc[i]
     df_bt["Net_Inventory_BTC"] = inventory
     df_bt["Inventory_Value_THB"] = df_bt["Net_Inventory_BTC"].abs() * df_bt["XSpring"]
+
+    # --- กำไร/ขาดทุนจาก inventory ที่ยังไม่ hedge (mark-to-market ตามราคาที่ขยับวันต่อวัน) ---
+    # นี่คือความเสี่ยงจริงที่ dealer แบกรับ: ถ้าราคาสวนทางระหว่างที่ inventory ยัง unhedged ก็ขาดทุนได้จริง
+    # การเชื่อมส่วนนี้เข้ากับพอร์ตคือสิ่งที่ทำให้เส้น Equity มีขึ้นมีลงสมจริง แทนที่จะไม่มีวันขาดทุนเลย (Max DD 0%)
+    price_change_thb = df_bt["XSpring"].diff().fillna(0.0)
+    prev_inventory_btc = pd.Series(inventory, index=df_bt.index).shift(1).fillna(0.0)
+    df_bt["Inventory_PnL_THB"] = prev_inventory_btc * price_change_thb
+
+    # --- กำไร/ขาดทุนสุทธิรายวัน = กำไร arbitrage ที่ realize แล้ว + PnL จาก inventory ที่ยังไม่ hedge ---
+    df_bt["Daily_Net_Profit"] = df_bt["Arb_Profit_THB"] + df_bt["Inventory_PnL_THB"]
+
+    df_bt["Cumulative_Profit"] = df_bt["Daily_Net_Profit"].cumsum()
+    df_bt["Portfolio_Value"] = initial_capital + df_bt["Cumulative_Profit"]
+    df_bt["Drawdown"] = df_bt["Portfolio_Value"] / df_bt["Portfolio_Value"].cummax() - 1
+
+    total_return_bt = (df_bt["Cumulative_Profit"].iloc[-1] / initial_capital) * 100
+    max_dd_bt = df_bt["Drawdown"].min() * 100
+    opportunity_days_bt = int((df_bt["Arb_Profit_THB"] > 0).sum())
+    opportunity_rate_bt = opportunity_days_bt / n_days_bt * 100 if n_days_bt else 0
 
     btc_daily_vol = np.log(df_bt["XSpring"] / df_bt["XSpring"].shift(1)).std()
     df_bt["VaR_95_THB"] = 1.65 * btc_daily_vol * df_bt["Inventory_Value_THB"]
@@ -949,7 +970,7 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
 
     fig2 = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.08,
                           row_heights=[0.34, 0.33, 0.33],
-                          subplot_titles=("Daily Net Arbitrage Profit (THB per BTC)",
+                          subplot_titles=(f"Daily Net P&L (THB) — ขนาดสถานะ ≤ {position_limit_btc:.2f} BTC/วัน ตาม Position Limit",
                                           "1-Year Strategy Equity Curve",
                                           "Drawdown (%)"))
     fig2.add_trace(go.Scatter(x=df_bt.index, y=df_bt["Daily_Net_Profit"], name="Daily Net Profit",
@@ -980,7 +1001,9 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
     st.caption(
         "⚠️ **ข้อจำกัดที่ควรรู้ก่อนใช้จริง:** สเปรดที่เห็นเป็นราคาจริง แต่การโอนเงินบาท/คริปโตข้ามประเทศเข้า-ออกกระดานไทย "
         "มีเวลาโอน ขั้นตอน KYC/AML และเพดานวงเงินที่ระบบจริงต้องรอ ไม่สามารถปิดสถานะ 2 ขาพร้อมกันได้ทันทีเหมือนเทรดในกระดานเดียว "
-        "ตัวเลขกำไรในกราฟจึงเป็น 'กำไรตามราคาที่สังเกตได้' ไม่ใช่กำไรที่รับประกันว่าทำได้จริงเสมอ"
+        f"เพื่อไม่ให้ผลตอบแทนพองเกินจริง โมเดลนี้จำกัดขนาดสถานะที่เทรดต่อวันไว้ไม่เกิน Position Limit ที่ตั้งไว้ ({position_limit_btc:.2f} BTC) "
+        "และคิดกำไร/ขาดทุนจากส่วนของสถานะที่ยังไม่ hedge (unhedged) ตามการเปลี่ยนแปลงราคาจริงในแต่ละวันด้วย จึงมีทั้งวันที่กำไรและวันที่ขาดทุนได้จริง "
+        "ตัวเลขในกราฟยังคงเป็น 'ผลตอบแทนโดยประมาณจากสเปรดที่สังเกตได้ ภายใต้สมมติฐานขนาดสถานะและ hedge ratio ที่ตั้งไว้' ไม่ใช่ผลตอบแทนที่รับประกันว่าทำได้จริงเสมอ"
     )
 
     show_data_table(df_bt, "xspring_arbitrage_real.csv")
