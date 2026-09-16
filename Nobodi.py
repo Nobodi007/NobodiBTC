@@ -805,6 +805,29 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
     if bitkub_hist is None or bitkub_hist.empty:
         st.error(f"⚠️ ดึงราคาย้อนหลังของ Bitkub ไม่ได้ ({bitkub_err}) จึงคำนวณราคา XSpring ย้อนหลังไม่ได้")
         st.stop()
+
+    # --- Sanity-check ราคา Bitkub เทียบกับราคาตลาดโลก (BTC-USD × USDTHB จาก Yahoo Finance) ---
+    # Bitkub ไม่มี public API ที่เสถียร บางช่วง (โดยเฉพาะข้อมูลเก่า) endpoint คืนราคาที่ผิดสเกล/ผิดปกติ
+    # เช่น ต่ำกว่าราคาตลาดโลกหลายเท่า ซึ่งถ้าปล่อยผ่านจะทำให้กราฟ Spread เพี้ยนทั้งหมด (แบบที่เห็นสเปรด
+    # พุ่งไป 2-3 ล้านบาทในปี 2024) จึงเทียบราคา Bitkub รายวันกับราคาอ้างอิงที่เชื่อถือได้กว่า แล้วตัดวันที่
+    # เพี้ยนเกิน ±35% ออก (ส่วนต่างราคาจริงของกระดานไทยแทบไม่เคยเกินระดับนี้แม้ช่วงเงินทุนไหลเข้าออกผิดปกติ)
+    ref_btc_thb_bt = (df_market_full["BTC-USD"] * df_market_full["USDTHB=X"]).reindex(
+        bitkub_hist.index, method="nearest"
+    )
+    ratio_bt = bitkub_hist / ref_btc_thb_bt
+    bad_mask_bt = ratio_bt.isna() | (ratio_bt < 0.65) | (ratio_bt > 1.35)
+    n_bad_bt = int(bad_mask_bt.sum())
+    if n_bad_bt > 0:
+        bitkub_hist = bitkub_hist[~bad_mask_bt]
+    if bitkub_hist.empty:
+        st.error("⚠️ ราคา Bitkub ที่ดึงมาผิดปกติทั้งหมด (ต่างจากราคาตลาดโลก×USDTHB เกิน ±35% ทุกวัน) จึงคำนวณราคา XSpring ย้อนหลังไม่ได้")
+        st.stop()
+    if n_bad_bt > 0:
+        st.warning(
+            f"⚠️ พบราคา Bitkub ที่ผิดปกติ {n_bad_bt} วัน (ต่างจากราคาตลาดโลก×USDTHB เกิน ±35% — น่าจะเป็นข้อมูลเก่าที่ endpoint คืนค่าผิดสเกล) "
+            "จึงตัดวันเหล่านั้นออกจากการคำนวณ Spread เพื่อไม่ให้ผลลัพธ์เพี้ยน"
+        )
+
     if not hist_data:
         st.error("⚠️ ดึงราคาย้อนหลังของกระดานต่างประเทศไม่ได้เลยสักกระดาน รายละเอียด:")
         for e in hist_errors:
@@ -831,6 +854,24 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
     if df_bt.empty or len(exchange_list_bt) == 0:
         st.error("⚠️ ข้อมูลที่ดึงมาไม่พอสำหรับคำนวณ (วันที่ไม่ตรงกันหรือข้อมูลไม่พอ)")
         st.stop()
+
+    st.markdown("### 🪙 ราคา Bitkub / XSpring ย้อนหลัง เทียบราคาอ้างอิงตลาดโลก")
+    st.markdown(
+        f"<span style='color: {MUTED_TEXT}; font-size: 13px;'>เส้นเขียวคือราคา Bitkub ที่ใช้เป็นฐานราคา XSpring จริง "
+        f"เส้นประคือราคาที่คำนวณจาก BTC-USD × USDTHB (Yahoo Finance) สำหรับเทียบว่าราคาที่ใช้สมเหตุสมผลหรือไม่</span>",
+        unsafe_allow_html=True
+    )
+    ref_check = (df_market_full["BTC-USD"] * df_market_full["USDTHB=X"]).reindex(df_bt.index, method="nearest")
+    fig_check = go.Figure()
+    fig_check.add_trace(go.Scatter(x=df_bt.index, y=df_bt["Bitkub_THB"], name="Bitkub (ใช้จริง)",
+                                    line=dict(color=PRIMARY_COLOR, width=1.6),
+                                    hovertemplate="%{x|%d %b %Y}<br>Bitkub: %{y:,.0f} THB<extra></extra>"))
+    fig_check.add_trace(go.Scatter(x=df_bt.index, y=ref_check, name="อ้างอิง (BTC-USD × USDTHB)",
+                                    line=dict(color=MUTED_TEXT, width=1.2, dash="dash"),
+                                    hovertemplate="%{x|%d %b %Y}<br>อ้างอิง: %{y:,.0f} THB<extra></extra>"))
+    fig_check.update_yaxes(title_text="THB")
+    fig_check = style_fig(fig_check, height=360)
+    st.plotly_chart(fig_check, use_container_width=True)
 
     for ex in exchange_list_bt:
         df_bt[f"Spread_{ex}"] = df_bt[ex] - df_bt["XSpring"]
