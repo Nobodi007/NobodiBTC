@@ -119,8 +119,6 @@ st.markdown(f"""
         overflow: hidden;
         height: auto;
     }}
-    /* แก้ปัญหา Streamlit ตัดตัวเลข/ข้อความด้วย "..." (ellipsis) เมื่อการ์ดแคบ
-       และแก้ปัญหาตัวเลขยาวๆ ล้นทะลุกรอบการ์ด: บังคับให้ตัดขึ้นบรรทัดใหม่ภายในกรอบเดิม */
     div[data-testid="stMetricValue"],
     div[data-testid="stMetricValue"] > div,
     div[data-testid="stMetricValue"] > div > div {{
@@ -208,6 +206,9 @@ xspring_fee_pct = st.sidebar.number_input(
 external_fee_pct = st.sidebar.number_input(
     "ค่าธรรมเนียมกระดานต่างประเทศต่อขา (%)", value=0.10, step=0.01, min_value=0.0
 ) / 100
+slippage_pct = st.sidebar.number_input(
+    "💧 Slippage เผื่อราคารูด (%)", value=0.10, step=0.01, min_value=0.0
+) / 100
 selected_exchanges = st.sidebar.multiselect(
     "กระดานต่างประเทศที่ใช้เทียบราคาจริง",
     ["Binance", "Bybit", "OKX", "Coinbase", "Gate", "Bitget"],
@@ -234,7 +235,6 @@ def load_market_data():
         close_data = data
     return close_data.dropna()
 
-
 try:
     with st.spinner("🔄 กำลังเชื่อมต่อข้อมูลตลาดแบบเรียลไทม์..."):
         df_market_full = load_market_data()
@@ -247,7 +247,6 @@ except Exception as e:
 
 df_market = df_market_full.tail(lookback_days).copy()
 
-
 def show_data_table(df: pd.DataFrame, filename: str, label: str = "📄 แสดงข้อมูลดิบ / ดาวน์โหลด CSV"):
     with st.expander(label):
         st.dataframe(df.tail(500), use_container_width=True)
@@ -258,13 +257,11 @@ def show_data_table(df: pd.DataFrame, filename: str, label: str = "📄 แส�
             mime="text/csv",
         )
 
-
 def sharpe_ratio(returns: pd.Series, periods_per_year: int = 365) -> float:
     r = returns.dropna()
     if r.std() == 0 or len(r) == 0:
         return 0.0
     return (r.mean() / r.std()) * np.sqrt(periods_per_year)
-
 
 def fmt_thb_compact(value: float) -> str:
     """ย่อตัวเลขบาทให้สั้น กันข้อความล้นกรอบการ์ด (ค่าเต็มดูได้จาก tooltip ตอนชี้เมาส์)"""
@@ -275,20 +272,13 @@ def fmt_thb_compact(value: float) -> str:
         return f"{value / 1_000:.1f}K THB"
     return f"{value:,.0f} THB"
 
-
 # ----------------------------------------------------
 # MODULE 4 DATA SOURCES: ราคาจริงจาก Public API ของแต่ละกระดาน
-# (XSpring ไม่มี public API/ข้อมูลย้อนหลังสาธารณะ — อ้างอิงจาก Bitkub ที่ตรวจสอบแล้วว่า
-#  XSpring ใช้ราคาเดียวกันเป็นฐาน + ค่าธรรมเนียมของตัวเอง)
 # ----------------------------------------------------
 _REQ_HEADERS = {"User-Agent": "Mozilla/5.0 (XSpringQuantTerminal)"}
 _REQ_TIMEOUT = 8
 
-
 def _safe_get(url, params=None):
-    """คืนค่า (json_data, error_reason). error_reason เป็น None ถ้าสำเร็จ
-    มิฉะนั้นจะบอกสาเหตุจริง เช่น 'HTTP 451' (โดนบล็อกตามภูมิภาค/เซิร์ฟเวอร์ cloud),
-    'Timeout', 'Connection error' ฯลฯ เพื่อ debug ได้ตรงจุดแทนที่จะเดา"""
     try:
         r = requests.get(url, params=params, headers=_REQ_HEADERS, timeout=_REQ_TIMEOUT)
         if r.status_code != 200:
@@ -301,38 +291,27 @@ def _safe_get(url, params=None):
     except Exception as e:
         return None, f"{type(e).__name__}"
 
-
-
-# ---------- HISTORICAL (ย้อนหลังจริง ~1 ปี) — คืนค่า (series, error_reason) เสมอ ----------
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_hist_binance(days=365):
     data, err = _safe_get("https://api.binance.com/api/v3/klines",
                            {"symbol": "BTCUSDT", "interval": "1d", "limit": min(days, 1000)})
-    if err:
-        return None, err
-    if not data:
-        return None, "ไม่มีข้อมูล"
+    if err: return None, err
+    if not data: return None, "ไม่มีข้อมูล"
     idx = [pd.to_datetime(r[0], unit="ms") for r in data]
     close = [float(r[4]) for r in data]
     return pd.Series(close, index=idx), None
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_hist_bybit(days=365):
     data, err = _safe_get("https://api.bybit.com/v5/market/kline",
                            {"category": "spot", "symbol": "BTCUSDT", "interval": "D", "limit": min(days, 1000)})
-    if err:
-        return None, err
-    try:
-        rows = sorted(data["result"]["list"], key=lambda r: int(r[0]))
-    except Exception:
-        return None, "รูปแบบข้อมูลเปลี่ยน (parse error)"
-    if not rows:
-        return None, "ไม่มีข้อมูล"
+    if err: return None, err
+    try: rows = sorted(data["result"]["list"], key=lambda r: int(r[0]))
+    except Exception: return None, "รูปแบบข้อมูลเปลี่ยน (parse error)"
+    if not rows: return None, "ไม่มีข้อมูล"
     idx = [pd.to_datetime(int(r[0]), unit="ms") for r in rows]
     close = [float(r[4]) for r in rows]
     return pd.Series(close, index=idx), None
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_hist_okx(days=365):
@@ -340,30 +319,24 @@ def fetch_hist_okx(days=365):
     last_err = None
     for _ in range(5):
         params = {"instId": "BTC-USDT", "bar": "1D", "limit": "100"}
-        if after:
-            params["after"] = after
+        if after: params["after"] = after
         data, err = _safe_get("https://www.okx.com/api/v5/market/history-candles", params)
         if err:
             last_err = err
             break
-        try:
-            rows = data["data"]
+        try: rows = data["data"]
         except Exception:
             last_err = "รูปแบบข้อมูลเปลี่ยน (parse error)"
             break
-        if not rows:
-            break
+        if not rows: break
         all_rows.extend(rows)
         after = rows[-1][0]
-        if len(all_rows) >= days:
-            break
-    if not all_rows:
-        return None, last_err or "ไม่มีข้อมูล"
+        if len(all_rows) >= days: break
+    if not all_rows: return None, last_err or "ไม่มีข้อมูล"
     all_rows = sorted(all_rows, key=lambda r: int(r[0]))
     idx = [pd.to_datetime(int(r[0]), unit="ms") for r in all_rows]
     close = [float(r[4]) for r in all_rows]
     return pd.Series(close, index=idx).drop_duplicates(), None
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_hist_coinbase(days=365):
@@ -380,35 +353,28 @@ def fetch_hist_coinbase(days=365):
         if err:
             last_err = err
             break
-        if not data:
-            break
-        for row in data:  # [time, low, high, open, close, volume]
+        if not data: break
+        for row in data:
             points[int(row[0])] = float(row[4])
         cursor_end = cursor_start
         remaining -= span
-        if remaining <= 0:
-            break
-    if not points:
-        return None, last_err or "ไม่มีข้อมูล"
+        if remaining <= 0: break
+    if not points: return None, last_err or "ไม่มีข้อมูล"
     ts = sorted(points.keys())
     return pd.Series([points[t] for t in ts], index=[pd.to_datetime(t, unit="s") for t in ts]), None
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_hist_gate(days=365):
     data, err = _safe_get("https://api.gateio.ws/api/v4/spot/candlesticks",
                            {"currency_pair": "BTC_USDT", "interval": "1d", "limit": min(days, 1000)})
-    if err:
-        return None, err
-    if not data:
-        return None, "ไม่มีข้อมูล"
+    if err: return None, err
+    if not data: return None, "ไม่มีข้อมูล"
     try:
         idx = [pd.to_datetime(int(r[0]), unit="s") for r in data]
-        close = [float(r[2]) for r in data]  # Gate.io: [t, volume, close, high, low, open]
+        close = [float(r[2]) for r in data]
         return pd.Series(close, index=idx), None
     except Exception:
         return None, "รูปแบบข้อมูลเปลี่ยน (parse error)"
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_hist_bitget(days=365):
@@ -421,40 +387,25 @@ def fetch_hist_bitget(days=365):
         if err:
             last_err = err
             break
-        try:
-            rows = data["data"]
+        try: rows = data["data"]
         except Exception:
             last_err = "รูปแบบข้อมูลเปลี่ยน (parse error)"
             break
-        if not rows:
-            break
+        if not rows: break
         all_rows.extend(rows)
         end_time = int(rows[0][0]) - 1
-        if len(all_rows) >= days:
-            break
-    if not all_rows:
-        return None, last_err or "ไม่มีข้อมูล"
+        if len(all_rows) >= days: break
+    if not all_rows: return None, last_err or "ไม่มีข้อมูล"
     all_rows = sorted(all_rows, key=lambda r: int(r[0]))
     idx = [pd.to_datetime(int(r[0]), unit="ms") for r in all_rows]
     close = [float(r[4]) for r in all_rows]
     return pd.Series(close, index=idx).drop_duplicates(), None
 
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_hist_bitkub(days=365):
-    """ราคา BTC/THB ย้อนหลังจาก Bitkub
-
-    หมายเหตุ: endpoint /tradingview/history ของ Bitkub ไม่เสถียร — บางช่วงถูก
-    deprecate/คืนค่าว่าง หรือปฏิเสธด้วย HTTP 400 ขึ้นกับรูปแบบ symbol ที่ส่งไป
-    (บางเวอร์ชันของเอกสาร/ライブラリ ใช้ "BTC_THB" บางที่ใช้ "THB_BTC")
-    เพื่อความเสถียร โค้ดนี้ลองทั้งสองรูปแบบก่อน แล้วค่อย fallback ไปใช้ CoinGecko
-    (public API ไม่ต้องใช้ key และรองรับราคาสกุล THB โดยตรง) เพื่อไม่ให้ทั้งโมดูลล่ม
-    ถ้า endpoint ของ Bitkub มีปัญหา
-    """
     now = int(time.time())
     frm = now - days * 86400
     last_err = None
-
     for sym in ("BTC_THB", "THB_BTC"):
         data, err = _safe_get(
             "https://api.bitkub.com/tradingview/history",
@@ -470,7 +421,6 @@ def fetch_hist_bitkub(days=365):
         close = [float(c) for c in data["c"]]
         return pd.Series(close, index=idx), None
 
-    # Fallback: CoinGecko ให้ราคา BTC เป็น THB ตรง ๆ รายวัน ไม่ต้องแปลงอัตราแลกเปลี่ยนเอง
     data, err = _safe_get(
         "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
         {"vs_currency": "thb", "days": min(days, 365), "interval": "daily"},
@@ -484,12 +434,10 @@ def fetch_hist_bitkub(days=365):
     close = [float(p[1]) for p in prices]
     return pd.Series(close, index=idx).drop_duplicates(), None
 
-
 HIST_FETCHERS = {
     "Binance": fetch_hist_binance, "Bybit": fetch_hist_bybit, "OKX": fetch_hist_okx,
     "Coinbase": fetch_hist_coinbase, "Gate": fetch_hist_gate, "Bitget": fetch_hist_bitget,
 }
-
 
 # ----------------------------------------------------
 # MODULE 1: USD/THB MEAN REVERSION
@@ -537,50 +485,25 @@ if app_mode == "1. USD/THB Mean Reversion Backtest":
     fig1 = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
                           row_heights=[0.7, 0.3],
                           subplot_titles=("Portfolio Value (THB)", "Drawdown (%)"))
-
-    fig1.add_trace(go.Scatter(
-        x=df_thb.index, y=df_thb["Portfolio_Value"], name="Equity Curve",
-        line=dict(color=PRIMARY_COLOR, width=2),
-        hovertemplate="%{x|%d %b %Y}<br>Portfolio: %{y:,.0f} THB<extra></extra>"
-    ), row=1, col=1)
-
-    fig1.add_trace(go.Scatter(
-        x=drawdown.index, y=drawdown.values * 100, name="Drawdown",
-        line=dict(color=ACCENT_RED, width=1), fill="tozeroy",
-        fillcolor="rgba(255,77,77,0.25)",
-        hovertemplate="%{x|%d %b %Y}<br>Drawdown: %{y:.2f}%<extra></extra>"
-    ), row=2, col=1)
-
+    fig1.add_trace(go.Scatter(x=df_thb.index, y=df_thb["Portfolio_Value"], name="Equity Curve", line=dict(color=PRIMARY_COLOR, width=2)), row=1, col=1)
+    fig1.add_trace(go.Scatter(x=drawdown.index, y=drawdown.values * 100, name="Drawdown", line=dict(color=ACCENT_RED, width=1), fill="tozeroy", fillcolor="rgba(255,77,77,0.25)"), row=2, col=1)
     fig1.update_yaxes(title_text="THB", row=1, col=1)
     fig1.update_yaxes(title_text="%", row=2, col=1)
     fig1 = style_fig(fig1, height=650)
     fig1.update_layout(title=dict(text="USD/THB Mean Reversion Strategy", font=dict(color=PRIMARY_COLOR, size=16)))
     st.plotly_chart(fig1, use_container_width=True)
 
-    # กราฟ USD/THB + Z-Score พร้อมจุดสัญญาณซื้อ/ขาย
     fig2 = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
                           row_heights=[0.6, 0.4],
                           subplot_titles=("USD/THB & Moving Average", "Z-Score & Trade Signals"))
-
-    fig2.add_trace(go.Scatter(x=df_thb.index, y=df_thb["USDTHB"], name="USD/THB",
-                               line=dict(color=TEXT_COLOR, width=1.3),
-                               hovertemplate="%{x|%d %b %Y}<br>USD/THB: %{y:.3f}<extra></extra>"), row=1, col=1)
-    fig2.add_trace(go.Scatter(x=df_thb.index, y=df_thb["MA"], name=f"MA({window_ma})",
-                               line=dict(color=ACCENT_ORANGE, width=1.3, dash="dash"),
-                               hovertemplate="%{x|%d %b %Y}<br>MA: %{y:.3f}<extra></extra>"), row=1, col=1)
+    fig2.add_trace(go.Scatter(x=df_thb.index, y=df_thb["USDTHB"], name="USD/THB", line=dict(color=TEXT_COLOR, width=1.3)), row=1, col=1)
+    fig2.add_trace(go.Scatter(x=df_thb.index, y=df_thb["MA"], name=f"MA({window_ma})", line=dict(color=ACCENT_ORANGE, width=1.3, dash="dash")), row=1, col=1)
 
     buys = df_thb[df_thb["Signal"] == 1]
     sells = df_thb[df_thb["Signal"] == -1]
-    fig2.add_trace(go.Scatter(x=buys.index, y=buys["USDTHB"], name="Buy Signal", mode="markers",
-                               marker=dict(color=PRIMARY_COLOR, size=8, symbol="triangle-up"),
-                               hovertemplate="%{x|%d %b %Y}<br>Buy @ %{y:.3f}<extra></extra>"), row=1, col=1)
-    fig2.add_trace(go.Scatter(x=sells.index, y=sells["USDTHB"], name="Sell Signal", mode="markers",
-                               marker=dict(color=ACCENT_RED, size=8, symbol="triangle-down"),
-                               hovertemplate="%{x|%d %b %Y}<br>Sell @ %{y:.3f}<extra></extra>"), row=1, col=1)
-
-    fig2.add_trace(go.Scatter(x=df_thb.index, y=df_thb["Z_Score"], name="Z-Score",
-                               line=dict(color=ACCENT_BLUE, width=1.3),
-                               hovertemplate="%{x|%d %b %Y}<br>Z-Score: %{y:.2f}<extra></extra>"), row=2, col=1)
+    fig2.add_trace(go.Scatter(x=buys.index, y=buys["USDTHB"], name="Buy Signal", mode="markers", marker=dict(color=PRIMARY_COLOR, size=8, symbol="triangle-up")), row=1, col=1)
+    fig2.add_trace(go.Scatter(x=sells.index, y=sells["USDTHB"], name="Sell Signal", mode="markers", marker=dict(color=ACCENT_RED, size=8, symbol="triangle-down")), row=1, col=1)
+    fig2.add_trace(go.Scatter(x=df_thb.index, y=df_thb["Z_Score"], name="Z-Score", line=dict(color=ACCENT_BLUE, width=1.3)), row=2, col=1)
     fig2.add_hline(y=2, line=dict(color=ACCENT_RED, dash="dot"), row=2, col=1)
     fig2.add_hline(y=-2, line=dict(color=PRIMARY_COLOR, dash="dot"), row=2, col=1)
     fig2.add_hline(y=0, line=dict(color=MUTED_TEXT, dash="dash"), row=2, col=1)
@@ -627,21 +550,11 @@ elif app_mode == "2. USDT vs USDC Z-Score & Spread (THB)":
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
                          row_heights=[0.55, 0.45],
                          subplot_titles=("USDT vs USDC Spread (THB) & Moving Average", "Z-Score Indicator & Trigger Boundaries"))
-
-    fig.add_trace(go.Scatter(x=df_s.index, y=df_s["Spread_THB"], name="Spread (THB)",
-                              line=dict(color=PRIMARY_COLOR, width=1.3),
-                              hovertemplate="%{x|%d %b %Y}<br>Spread: %{y:,.2f} THB<extra></extra>"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df_s.index, y=df_s["MA"], name=f"MA({window_ma})",
-                              line=dict(color=ACCENT_ORANGE, width=1.3, dash="dash"),
-                              hovertemplate="%{x|%d %b %Y}<br>MA: %{y:,.2f} THB<extra></extra>"), row=1, col=1)
-
-    fig.add_trace(go.Scatter(x=df_s.index, y=df_s["Z_Score"], name="Z-Score",
-                              line=dict(color=ACCENT_RED, width=1.3),
-                              hovertemplate="%{x|%d %b %Y}<br>Z-Score: %{y:.2f}<extra></extra>"), row=2, col=1)
-    fig.add_hline(y=2, line=dict(color=ACCENT_RED, dash="dot"), annotation_text="Overbought (+2)",
-                  annotation_font_color=ACCENT_RED, row=2, col=1)
-    fig.add_hline(y=-2, line=dict(color=PRIMARY_COLOR, dash="dot"), annotation_text="Oversold (-2)",
-                  annotation_font_color=PRIMARY_COLOR, row=2, col=1)
+    fig.add_trace(go.Scatter(x=df_s.index, y=df_s["Spread_THB"], name="Spread (THB)", line=dict(color=PRIMARY_COLOR, width=1.3)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_s.index, y=df_s["MA"], name=f"MA({window_ma})", line=dict(color=ACCENT_ORANGE, width=1.3, dash="dash")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_s.index, y=df_s["Z_Score"], name="Z-Score", line=dict(color=ACCENT_RED, width=1.3)), row=2, col=1)
+    fig.add_hline(y=2, line=dict(color=ACCENT_RED, dash="dot"), annotation_text="Overbought (+2)", annotation_font_color=ACCENT_RED, row=2, col=1)
+    fig.add_hline(y=-2, line=dict(color=PRIMARY_COLOR, dash="dot"), annotation_text="Oversold (-2)", annotation_font_color=PRIMARY_COLOR, row=2, col=1)
     fig.add_hline(y=0, line=dict(color=MUTED_TEXT, dash="dash"), row=2, col=1)
 
     fig.update_yaxes(title_text="THB", row=1, col=1)
@@ -649,14 +562,9 @@ elif app_mode == "2. USDT vs USDC Z-Score & Spread (THB)":
     fig = style_fig(fig, height=650)
     st.plotly_chart(fig, use_container_width=True)
 
-    # ราคา USDT vs USDC ดิบ
     fig_raw = go.Figure()
-    fig_raw.add_trace(go.Scatter(x=df_s.index, y=df_s["USDT"], name="USDT/USD",
-                                  line=dict(color=PRIMARY_COLOR, width=1.3),
-                                  hovertemplate="%{x|%d %b %Y}<br>USDT: $%{y:.4f}<extra></extra>"))
-    fig_raw.add_trace(go.Scatter(x=df_s.index, y=df_s["USDC"], name="USDC/USD",
-                                  line=dict(color=ACCENT_BLUE, width=1.3),
-                                  hovertemplate="%{x|%d %b %Y}<br>USDC: $%{y:.4f}<extra></extra>"))
+    fig_raw.add_trace(go.Scatter(x=df_s.index, y=df_s["USDT"], name="USDT/USD", line=dict(color=PRIMARY_COLOR, width=1.3)))
+    fig_raw.add_trace(go.Scatter(x=df_s.index, y=df_s["USDC"], name="USDC/USD", line=dict(color=ACCENT_BLUE, width=1.3)))
     fig_raw.update_layout(title=dict(text="USDT vs USDC — Raw Price (USD)", font=dict(color=PRIMARY_COLOR, size=16)))
     fig_raw.update_yaxes(title_text="USD")
     fig_raw = style_fig(fig_raw, height=380)
@@ -704,8 +612,7 @@ elif app_mode == "3. Multi-Asset Realised Volatility":
         fig.add_trace(go.Scatter(
             x=realised_vol.index, y=realised_vol[a],
             name=f"{a} RV (Avg: {rv_avg[a]:.2f}%)",
-            line=dict(color=rv_colors[a], width=1.5),
-            hovertemplate="%{x|%d %b %Y}<br>" + a + ": %{y:.2f}%<extra></extra>"
+            line=dict(color=rv_colors[a], width=1.5)
         ))
     fig.update_layout(title=dict(text="30-Day Annualised Realised Volatility Comparison (%)",
                                   font=dict(color=PRIMARY_COLOR, size=16)))
@@ -713,9 +620,6 @@ elif app_mode == "3. Multi-Asset Realised Volatility":
     fig = style_fig(fig, height=480)
     st.plotly_chart(fig, use_container_width=True)
 
-    # ----------------------------------------------------
-    # 🌋 3D VOLATILITY LANDSCAPE — เวลา × สินทรัพย์ × ความผันผวน
-    # ----------------------------------------------------
     st.markdown("### 🌋 Volatility Landscape (3D) — หมุน/ซูม/เอียงมุมได้ด้วยเมาส์")
     st.markdown(f"<span style='color: {MUTED_TEXT}; font-size: 13px;'>พื้นผิว 3 มิติแสดงความสัมพันธ์ระหว่าง เวลา (แกน X) × สินทรัพย์ (แกน Y) × ระดับความผันผวน (แกน Z สูง = ผันผวนมาก) "
                 f"— BTC/ETH จะเห็นเป็นเทือกเขาสูงชัดเจน ต่างจาก stablecoin ที่ราบเรียบ</span>", unsafe_allow_html=True)
@@ -728,7 +632,6 @@ elif app_mode == "3. Multi-Asset Realised Volatility":
         colorscale=[[0, "#0d1117"], [0.35, "#0d3d24"], [0.7, "#0e8a4a"], [1, PRIMARY_COLOR]],
         showscale=True,
         colorbar=dict(title="RV %", tickfont=dict(color=TEXT_COLOR), title_font=dict(color=TEXT_COLOR)),
-        hovertemplate="Asset: %{customdata}<br>%{x|%d %b %Y}<br>RV: %{z:.2f}%<extra></extra>",
         customdata=np.array([[a] * len(realised_vol.index) for a in ASSET_ORDER]),
         contours=dict(z=dict(show=True, usecolormap=True, highlightcolor=TEXT_COLOR, project=dict(z=True))),
     )])
@@ -764,7 +667,6 @@ elif app_mode == "3. Multi-Asset Realised Volatility":
         text=corr_matrix.values,
         texttemplate="%{text}",
         textfont=dict(color=TEXT_COLOR, size=13),
-        hovertemplate="%{y} vs %{x}<br>Correlation: %{z:.3f}<extra></extra>",
         colorbar=dict(title="ρ", tickfont=dict(color=TEXT_COLOR), title_font=dict(color=TEXT_COLOR)),
     ))
     fig_heat.update_layout(title=dict(text="Return Correlation", font=dict(color=PRIMARY_COLOR, size=16)))
@@ -806,11 +708,6 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
         st.error(f"⚠️ ดึงราคาย้อนหลังของ Bitkub ไม่ได้ ({bitkub_err}) จึงคำนวณราคา XSpring ย้อนหลังไม่ได้")
         st.stop()
 
-    # --- Sanity-check ราคา Bitkub เทียบกับราคาตลาดโลก (BTC-USD × USDTHB จาก Yahoo Finance) ---
-    # Bitkub ไม่มี public API ที่เสถียร บางช่วง (โดยเฉพาะข้อมูลเก่า) endpoint คืนราคาที่ผิดสเกล/ผิดปกติ
-    # เช่น ต่ำกว่าราคาตลาดโลกหลายเท่า ซึ่งถ้าปล่อยผ่านจะทำให้กราฟ Spread เพี้ยนทั้งหมด (แบบที่เห็นสเปรด
-    # พุ่งไป 2-3 ล้านบาทในปี 2024) จึงเทียบราคา Bitkub รายวันกับราคาอ้างอิงที่เชื่อถือได้กว่า แล้วตัดวันที่
-    # เพี้ยนเกิน ±35% ออก (ส่วนต่างราคาจริงของกระดานไทยแทบไม่เคยเกินระดับนี้แม้ช่วงเงินทุนไหลเข้าออกผิดปกติ)
     ref_btc_thb_bt = (df_market_full["BTC-USD"] * df_market_full["USDTHB=X"]).reindex(
         bitkub_hist.index, method="nearest"
     )
@@ -864,43 +761,45 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
     ref_check = (df_market_full["BTC-USD"] * df_market_full["USDTHB=X"]).reindex(df_bt.index, method="nearest")
     fig_check = go.Figure()
     fig_check.add_trace(go.Scatter(x=df_bt.index, y=df_bt["Bitkub_THB"], name="Bitkub (ใช้จริง)",
-                                    line=dict(color=PRIMARY_COLOR, width=1.6),
-                                    hovertemplate="%{x|%d %b %Y}<br>Bitkub: %{y:,.0f} THB<extra></extra>"))
+                                    line=dict(color=PRIMARY_COLOR, width=1.6)))
     fig_check.add_trace(go.Scatter(x=df_bt.index, y=ref_check, name="อ้างอิง (BTC-USD × USDTHB)",
-                                    line=dict(color=MUTED_TEXT, width=1.2, dash="dash"),
-                                    hovertemplate="%{x|%d %b %Y}<br>อ้างอิง: %{y:,.0f} THB<extra></extra>"))
+                                    line=dict(color=MUTED_TEXT, width=1.2, dash="dash")))
     fig_check.update_yaxes(title_text="THB")
     fig_check = style_fig(fig_check, height=360)
     st.plotly_chart(fig_check, use_container_width=True)
 
+    # ----------------------------------------------------
+    # 🚨 DATA CLEANSING & SPREAD CALCULATION
+    # ----------------------------------------------------
+    # 1. กรองข้อมูลขยะ (Outliers) จาก API ด้วย Median ป้องกันตัวเลขบั๊กทะลุเพดาน
+    ref_price_median = df_bt[exchange_list_bt].median(axis=1)
+    for ex in exchange_list_bt:
+        outlier_mask = (abs(df_bt[ex] - ref_price_median) / ref_price_median) > 0.03
+        df_bt.loc[outlier_mask, ex] = np.nan
+
+    # 2. คำนวณ Spread ปกติ (อาจจะเหลือ NaN ถ้าโดนกรองไป)
     for ex in exchange_list_bt:
         df_bt[f"Spread_{ex}"] = df_bt[ex] - df_bt["XSpring"]
 
-    df_bt["Best_External_Buy"] = df_bt[exchange_list_bt].min(axis=1)
-    df_bt["Best_External_Sell"] = df_bt[exchange_list_bt].max(axis=1)
+    # 3. หาจุดซื้อ/ขายที่ดีที่สุด โดยข้าม (skip) ข้อมูลที่เป็น NaN ทิ้งไป
+    df_bt["Best_External_Buy"] = df_bt[exchange_list_bt].min(axis=1, skipna=True)
+    df_bt["Best_External_Sell"] = df_bt[exchange_list_bt].max(axis=1, skipna=True)
 
-    df_bt["Profit_X_Buy"] = df_bt["Best_External_Sell"] * (1 - external_fee_pct) - df_bt["XSpring"] * (1 + xspring_fee_pct)
-    df_bt["Profit_X_Sell"] = df_bt["XSpring"] * (1 - xspring_fee_pct) - df_bt["Best_External_Buy"] * (1 + external_fee_pct)
+    # 4. คำนวณกำไรโดยหักค่าธรรมเนียมและตัวแปร Slippage เพิ่มเติมเข้าไป
+    df_bt["Profit_X_Buy"] = (df_bt["Best_External_Sell"] * (1 - external_fee_pct - slippage_pct)) - (df_bt["XSpring"] * (1 + xspring_fee_pct + slippage_pct))
+    df_bt["Profit_X_Sell"] = (df_bt["XSpring"] * (1 - xspring_fee_pct - slippage_pct)) - (df_bt["Best_External_Buy"] * (1 + external_fee_pct + slippage_pct))
 
-    # ส่วนต่างราคาสุทธิ "ต่อ 1 BTC" หลังหักค่าธรรมเนียมแล้ว (ยังไม่ใช่กำไรที่ทำได้จริง —
-    # ต้องคูณด้วยขนาดสถานะที่เทรดได้จริงก่อน)
     df_bt["Spread_Profit_Per_BTC"] = np.maximum(df_bt["Profit_X_Buy"], df_bt["Profit_X_Sell"])
     df_bt["Spread_Profit_Per_BTC"] = np.where(df_bt["Spread_Profit_Per_BTC"] > 0, df_bt["Spread_Profit_Per_BTC"], 0.0)
     n_days_bt = len(df_bt)
 
-    # --- ขนาดสถานะที่เทรดได้จริงต่อวัน ---
-    # เดิมโค้ดคูณส่วนต่างราคาต่อ BTC ตรง ๆ เข้ากับพอร์ตเหมือนเทรดได้ไม่จำกัดทุกวัน ทำให้ผลตอบแทนพองเกินจริง
-    # (เช่น 80,000%+ ต่อปี) ในความเป็นจริง Dealer ใช้เงินทุนจำกัด และมี Position Limit ที่ตั้งไว้เอง
-    # (แถบด้านซ้าย) จึงจำกัดขนาดสถานะต่อวันด้วยค่าที่น้อยกว่าระหว่าง Position Limit กับเงินทุนตั้งต้นที่มี
     trade_size_btc = np.minimum(position_limit_btc, initial_capital / df_bt["XSpring"])
     trade_direction = np.sign(df_bt["Profit_X_Buy"] - df_bt["Profit_X_Sell"]) * (df_bt["Spread_Profit_Per_BTC"] > 0)
 
-    # กำไรที่ realize จริงจากการทำ arbitrage ต่อวัน (บาท) = ส่วนต่างราคาต่อ BTC × ขนาดสถานะที่เทรดจริง
     df_bt["Arb_Profit_THB"] = np.where(
         df_bt["Spread_Profit_Per_BTC"] > 0, df_bt["Spread_Profit_Per_BTC"] * trade_size_btc, 0.0
     )
 
-    # --- Dealer Inventory: ส่วนที่ยัง unhedged จากแต่ละรอบ (ความเสี่ยงจาก latency ระหว่างขา XSpring กับตลาดนอก) ---
     unhedged_leg_btc = trade_direction * trade_size_btc * (unhedged_pct / 100)
     inventory = np.zeros(n_days_bt)
     for i in range(n_days_bt):
@@ -909,14 +808,10 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
     df_bt["Net_Inventory_BTC"] = inventory
     df_bt["Inventory_Value_THB"] = df_bt["Net_Inventory_BTC"].abs() * df_bt["XSpring"]
 
-    # --- กำไร/ขาดทุนจาก inventory ที่ยังไม่ hedge (mark-to-market ตามราคาที่ขยับวันต่อวัน) ---
-    # นี่คือความเสี่ยงจริงที่ dealer แบกรับ: ถ้าราคาสวนทางระหว่างที่ inventory ยัง unhedged ก็ขาดทุนได้จริง
-    # การเชื่อมส่วนนี้เข้ากับพอร์ตคือสิ่งที่ทำให้เส้น Equity มีขึ้นมีลงสมจริง แทนที่จะไม่มีวันขาดทุนเลย (Max DD 0%)
     price_change_thb = df_bt["XSpring"].diff().fillna(0.0)
     prev_inventory_btc = pd.Series(inventory, index=df_bt.index).shift(1).fillna(0.0)
     df_bt["Inventory_PnL_THB"] = prev_inventory_btc * price_change_thb
 
-    # --- กำไร/ขาดทุนสุทธิรายวัน = กำไร arbitrage ที่ realize แล้ว + PnL จาก inventory ที่ยังไม่ hedge ---
     df_bt["Daily_Net_Profit"] = df_bt["Arb_Profit_THB"] + df_bt["Inventory_PnL_THB"]
 
     df_bt["Cumulative_Profit"] = df_bt["Daily_Net_Profit"].cumsum()
@@ -960,8 +855,7 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
     for ex in exchange_list_bt:
         fig1.add_trace(go.Scatter(
             x=df_bt.index, y=df_bt[f"Spread_{ex}"], name=ex,
-            line=dict(color=EXCHANGE_COLORS.get(ex, ACCENT_BLUE), width=1.4),
-            hovertemplate=f"{ex}" + ": %{y:,.0f} THB<extra></extra>"
+            line=dict(color=EXCHANGE_COLORS.get(ex, ACCENT_BLUE), width=1.4)
         ))
     fig1.add_hline(y=0, line=dict(color=MUTED_TEXT, dash="dash"))
     fig1.update_yaxes(title_text="Spread vs XSpring (THB)")
@@ -973,16 +867,9 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
                           subplot_titles=(f"Daily Net P&L (THB) — ขนาดสถานะ ≤ {position_limit_btc:.2f} BTC/วัน ตาม Position Limit",
                                           "1-Year Strategy Equity Curve",
                                           "Drawdown (%)"))
-    fig2.add_trace(go.Scatter(x=df_bt.index, y=df_bt["Daily_Net_Profit"], name="Daily Net Profit",
-                               line=dict(color="#3fb950", width=1),
-                               hovertemplate="%{x|%d %b %Y}<br>Profit: %{y:,.0f} THB<extra></extra>"), row=1, col=1)
-    fig2.add_trace(go.Scatter(x=df_bt.index, y=df_bt["Portfolio_Value"], name="Portfolio Value",
-                               line=dict(color=ACCENT_BLUE, width=2),
-                               hovertemplate="%{x|%d %b %Y}<br>Portfolio: %{y:,.0f} THB<extra></extra>"), row=2, col=1)
-    fig2.add_trace(go.Scatter(x=df_bt.index, y=df_bt["Drawdown"] * 100, name="Drawdown",
-                               line=dict(color=ACCENT_RED, width=1), fill="tozeroy",
-                               fillcolor="rgba(255,77,77,0.25)",
-                               hovertemplate="%{x|%d %b %Y}<br>Drawdown: %{y:.2f}%<extra></extra>"), row=3, col=1)
+    fig2.add_trace(go.Scatter(x=df_bt.index, y=df_bt["Daily_Net_Profit"], name="Daily Net Profit", line=dict(color="#3fb950", width=1)), row=1, col=1)
+    fig2.add_trace(go.Scatter(x=df_bt.index, y=df_bt["Portfolio_Value"], name="Portfolio Value", line=dict(color=ACCENT_BLUE, width=2)), row=2, col=1)
+    fig2.add_trace(go.Scatter(x=df_bt.index, y=df_bt["Drawdown"] * 100, name="Drawdown", line=dict(color=ACCENT_RED, width=1), fill="tozeroy", fillcolor="rgba(255,77,77,0.25)"), row=3, col=1)
     fig2 = style_fig(fig2, height=750)
     st.plotly_chart(fig2, use_container_width=True)
 
@@ -990,8 +877,7 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
     avg_spread_bt = pd.Series({ex: df_bt[f"Spread_{ex}"].mean() for ex in exchange_list_bt}).sort_values()
     fig3 = go.Figure(go.Bar(
         x=avg_spread_bt.values, y=avg_spread_bt.index, orientation="h",
-        marker_color=[EXCHANGE_COLORS.get(ex, ACCENT_BLUE) for ex in avg_spread_bt.index],
-        hovertemplate="%{y}<br>Avg Spread: %{x:,.0f} THB<extra></extra>"
+        marker_color=[EXCHANGE_COLORS.get(ex, ACCENT_BLUE) for ex in avg_spread_bt.index]
     ))
     fig3.add_vline(x=0, line=dict(color=MUTED_TEXT))
     fig3.update_layout(title=dict(text="Average Spread vs XSpring per Exchange (THB)", font=dict(color=PRIMARY_COLOR, size=16)))
