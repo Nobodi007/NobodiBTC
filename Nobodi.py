@@ -286,69 +286,91 @@ _REQ_TIMEOUT = 8
 
 
 def _safe_get(url, params=None):
+    """คืนค่า (json_data, error_reason). error_reason เป็น None ถ้าสำเร็จ
+    มิฉะนั้นจะบอกสาเหตุจริง เช่น 'HTTP 451' (โดนบล็อกตามภูมิภาค/เซิร์ฟเวอร์ cloud),
+    'Timeout', 'Connection error' ฯลฯ เพื่อ debug ได้ตรงจุดแทนที่จะเดา"""
     try:
         r = requests.get(url, params=params, headers=_REQ_HEADERS, timeout=_REQ_TIMEOUT)
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return None
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+        return r.json(), None
+    except requests.exceptions.Timeout:
+        return None, "Timeout"
+    except requests.exceptions.ConnectionError:
+        return None, "Connection error"
+    except Exception as e:
+        return None, f"{type(e).__name__}"
 
 
 # ---------- LIVE (ราคา ณ ปัจจุบัน) ----------
 def _live_bitkub_thb():
-    data = _safe_get("https://api.bitkub.com/api/market/ticker")
+    data, err = _safe_get("https://api.bitkub.com/api/market/ticker")
+    if err:
+        return None, err
     try:
-        return float(data["THB_BTC"]["last"])
+        return float(data["THB_BTC"]["last"]), None
     except Exception:
-        return None
+        return None, "รูปแบบข้อมูลเปลี่ยน (parse error)"
 
 
 def _live_binance_usdt():
-    data = _safe_get("https://api.binance.com/api/v3/ticker/price", {"symbol": "BTCUSDT"})
+    data, err = _safe_get("https://api.binance.com/api/v3/ticker/price", {"symbol": "BTCUSDT"})
+    if err:
+        return None, err
     try:
-        return float(data["price"])
+        return float(data["price"]), None
     except Exception:
-        return None
+        return None, "รูปแบบข้อมูลเปลี่ยน (parse error)"
 
 
 def _live_bybit_usdt():
-    data = _safe_get("https://api.bybit.com/v5/market/tickers", {"category": "spot", "symbol": "BTCUSDT"})
+    data, err = _safe_get("https://api.bybit.com/v5/market/tickers", {"category": "spot", "symbol": "BTCUSDT"})
+    if err:
+        return None, err
     try:
-        return float(data["result"]["list"][0]["lastPrice"])
+        return float(data["result"]["list"][0]["lastPrice"]), None
     except Exception:
-        return None
+        return None, "รูปแบบข้อมูลเปลี่ยน (parse error)"
 
 
 def _live_okx_usdt():
-    data = _safe_get("https://www.okx.com/api/v5/market/ticker", {"instId": "BTC-USDT"})
+    data, err = _safe_get("https://www.okx.com/api/v5/market/ticker", {"instId": "BTC-USDT"})
+    if err:
+        return None, err
     try:
-        return float(data["data"][0]["last"])
+        return float(data["data"][0]["last"]), None
     except Exception:
-        return None
+        return None, "รูปแบบข้อมูลเปลี่ยน (parse error)"
 
 
 def _live_coinbase_usd():
-    data = _safe_get("https://api.exchange.coinbase.com/products/BTC-USD/ticker")
+    data, err = _safe_get("https://api.exchange.coinbase.com/products/BTC-USD/ticker")
+    if err:
+        return None, err
     try:
-        return float(data["price"])
+        return float(data["price"]), None
     except Exception:
-        return None
+        return None, "รูปแบบข้อมูลเปลี่ยน (parse error)"
 
 
 def _live_gate_usdt():
-    data = _safe_get("https://api.gateio.ws/api/v4/spot/tickers", {"currency_pair": "BTC_USDT"})
+    data, err = _safe_get("https://api.gateio.ws/api/v4/spot/tickers", {"currency_pair": "BTC_USDT"})
+    if err:
+        return None, err
     try:
-        return float(data[0]["last"])
+        return float(data[0]["last"]), None
     except Exception:
-        return None
+        return None, "รูปแบบข้อมูลเปลี่ยน (parse error)"
 
 
 def _live_bitget_usdt():
-    data = _safe_get("https://api.bitget.com/api/v2/spot/market/tickers", {"symbol": "BTCUSDT"})
+    data, err = _safe_get("https://api.bitget.com/api/v2/spot/market/tickers", {"symbol": "BTCUSDT"})
+    if err:
+        return None, err
     try:
-        return float(data["data"][0]["lastPr"])
+        return float(data["data"][0]["lastPr"]), None
     except Exception:
-        return None
+        return None, "รูปแบบข้อมูลเปลี่ยน (parse error)"
 
 
 LIVE_FETCHERS_USD = {
@@ -368,21 +390,24 @@ def load_live_fx_usdthb():
 
 @st.cache_data(ttl=15, show_spinner=False)
 def load_live_prices(selected):
-    errors = []
-    bitkub_thb = _live_bitkub_thb()
-    if bitkub_thb is None:
-        errors.append("Bitkub")
+    errors = []  # list of "ชื่อกระดาน: สาเหตุ" เพื่อ debug ได้ตรงจุด
+    bitkub_thb, bitkub_err = _live_bitkub_thb()
+    if bitkub_err:
+        errors.append(f"Bitkub: {bitkub_err}")
     fx = load_live_fx_usdthb()
     if fx is None:
-        errors.append("USD/THB FX")
+        errors.append("USD/THB FX: ดึงไม่ได้")
     rows = {}
     for ex in selected:
         fn = LIVE_FETCHERS_USD.get(ex)
         if fn is None:
             continue
-        usd_price = fn()
-        if usd_price is None or fx is None:
-            errors.append(ex)
+        usd_price, ex_err = fn()
+        if ex_err:
+            errors.append(f"{ex}: {ex_err}")
+            continue
+        if fx is None:
+            errors.append(f"{ex}: มีราคาแต่ไม่มี FX แปลงเป็น THB")
             continue
         rows[ex] = usd_price * fx
     return bitkub_thb, rows, errors, fx
