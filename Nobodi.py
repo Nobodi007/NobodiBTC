@@ -111,13 +111,30 @@ st.markdown(f"""
         padding: 16px 18px;
         border-radius: 12px;
         box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        min-width: 0;
     }}
-    div[data-testid="stMetricValue"] {{
+    /* แก้ปัญหา Streamlit ตัดตัวเลข/ข้อความด้วย "..." (ellipsis) เมื่อการ์ดแคบ:
+       ยอมให้ตัวเลขและ label ขึ้นบรรทัดใหม่แทนการตัดคำ */
+    div[data-testid="stMetricValue"],
+    div[data-testid="stMetricValue"] > div,
+    div[data-testid="stMetricValue"] > div > div {{
         color: {PRIMARY_COLOR} !important;
         font-weight: 700;
+        font-size: clamp(1.05rem, 1.6vw, 1.6rem) !important;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+        line-height: 1.25 !important;
+        word-break: break-word !important;
     }}
-    div[data-testid="stMetricLabel"] {{
+    div[data-testid="stMetricLabel"],
+    div[data-testid="stMetricLabel"] > div,
+    div[data-testid="stMetricLabel"] p {{
         color: {MUTED_TEXT} !important;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+        word-break: break-word !important;
     }}
 
     .stButton > button {{
