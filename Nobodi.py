@@ -241,6 +241,16 @@ def sharpe_ratio(returns: pd.Series, periods_per_year: int = 365) -> float:
     return (r.mean() / r.std()) * np.sqrt(periods_per_year)
 
 
+def fmt_thb_compact(value: float) -> str:
+    """ย่อตัวเลขบาทให้สั้น กันข้อความล้นกรอบการ์ด (ค่าเต็มดูได้จาก tooltip ตอนชี้เมาส์)"""
+    abs_v = abs(value)
+    if abs_v >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M THB"
+    if abs_v >= 1_000:
+        return f"{value / 1_000:.1f}K THB"
+    return f"{value:,.0f} THB"
+
+
 # ----------------------------------------------------
 # MODULE 1: USD/THB MEAN REVERSION
 # ----------------------------------------------------
@@ -280,7 +290,8 @@ if app_mode == "1. USD/THB Mean Reversion Backtest":
     col2.metric("Max Drawdown", f"{max_dd:.2f}%")
     col3.metric("Sharpe Ratio", f"{sharpe:.2f}")
     col4.metric("Win Rate", f"{win_rate:.1f}%")
-    col5.metric("Ending Portfolio", f"{df_thb['Portfolio_Value'].iloc[-1]:,.0f} THB")
+    col5.metric("Ending Portfolio", fmt_thb_compact(df_thb['Portfolio_Value'].iloc[-1]),
+                help=f"{df_thb['Portfolio_Value'].iloc[-1]:,.2f} THB")
     st.markdown("<br>", unsafe_allow_html=True)
 
     fig1 = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
@@ -547,7 +558,8 @@ elif app_mode == "4. XSpring Multi-Exchange Arbitrage (1Y)":
     col1.metric("Arbitrage Total Return", f"{total_return_arb:.2f}%")
     col2.metric("Max Drawdown", f"{max_dd_arb:.2f}%")
     col3.metric("วันที่มีโอกาส Arbitrage", f"{opportunity_rate:.1f}%")
-    col4.metric("Ending Portfolio Value", f"{df_arb['Portfolio_Value'].iloc[-1]:,.0f} THB")
+    col4.metric("Ending Portfolio Value", fmt_thb_compact(df_arb['Portfolio_Value'].iloc[-1]),
+                help=f"{df_arb['Portfolio_Value'].iloc[-1]:,.2f} THB")
     st.markdown("<br>", unsafe_allow_html=True)
 
     fig1 = make_subplots(rows=1, cols=1,
